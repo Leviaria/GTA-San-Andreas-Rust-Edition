@@ -26,6 +26,7 @@ mod settings;
 mod shadow;
 mod streaming;
 mod upload;
+mod zones;
 use streaming::{Streamer, ORIGIN, RADIUS};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -120,6 +121,7 @@ struct State {
     headlights: wgpu::Buffer,
     shadows: shadow::Shadows,
     pub(crate) daycycle: daycycle::DayCycle,
+    zones: zones::Zones,
     lighting: daycycle::Lighting,
     light_frustum: culling::Frustum,
     batches: Vec<GpuBatch>,
@@ -630,6 +632,7 @@ impl State {
             headlights,
             shadows,
             daycycle: daycycle::DayCycle::default(),
+            zones: zones::Zones::default(),
             lighting: daycycle::DayCycle::default().lighting(12.0),
             light_frustum: culling::Frustum::default(),
             batches,
@@ -1897,6 +1900,7 @@ impl State {
                     });
             }
             self.update_map_overlay(coordinates);
+            self.menu.zone = self.zones.name_at(coordinates).map(str::to_owned);
             self.menu.clock = match self.menu.settings.fixed_hour {
                 Some(hour) => (u32::from(hour), 0),
                 None => self.daycycle.clock(),
@@ -2396,6 +2400,7 @@ impl ApplicationHandler for App {
             Ok(mut state) => {
                 state.roads = roads;
                 state.daycycle = daycycle::DayCycle::load(&self.game_dir);
+                state.zones = zones::Zones::load(&self.game_dir);
                 state.persist_settings = !self.smoke;
                 if self.smoke_graphics {
                     state.menu.open_graphics();

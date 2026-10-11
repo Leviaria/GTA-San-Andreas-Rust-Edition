@@ -76,25 +76,59 @@ fn clip_line(points: &[Pos2], area: Rect) -> Vec<[Pos2; 2]> {
     pieces
 }
 /// `point`, pulled back towards `origin` until it is inside `area`.
-fn clamp_towards(origin: Pos2, point: Pos2, area: Rect) -> Pos2 {
-    let direction = point - origin;
-    let mut t: f32 = 1.0;
-    for (delta, low, high, from) in [
-        (direction.x, area.left(), area.right(), origin.x),
-        (direction.y, area.top(), area.bottom(), origin.y),
+/// White HUD text with a black outline, as the original HUD draws it.
+fn outlined_text(ui: &mut egui::Ui, text: &str, font: FontId, color: Color32) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.into(), font, Color32::PLACEHOLDER);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + Vec2::splat(4.0), Sense::hover());
+    let at = rect.min + Vec2::splat(2.0);
+    let outline = Color32::from_black_alpha(color.a());
+    for offset in [
+        [-2.0, 0.0],
+        [2.0, 0.0],
+        [0.0, -2.0],
+        [0.0, 2.0],
+        [-1.5, -1.5],
+        [1.5, 1.5],
+        [-1.5, 1.5],
+        [1.5, -1.5],
     ] {
-        if delta > 0.0 && from + delta > high {
-            t = t.min((high - from) / delta);
-        } else if delta < 0.0 && from + delta < low {
-            t = t.min((low - from) / delta);
+        ui.painter().galley_with_override_text_color(
+            at + Vec2::from(offset),
+            galley.clone(),
+            outline,
+        );
+    }
+    ui.painter()
+        .galley_with_override_text_color(at, galley, color);
+}
+/// Keeps the parts of a polyline inside a circle.
+fn clip_line_circle(points: &[Pos2], centre: Pos2, radius: f32) -> Vec<[Pos2; 2]> {
+    let mut pieces = Vec::new();
+    for pair in points.windows(2) {
+        let (a, d) = (pair[0] - centre, pair[1] - pair[0]);
+        // Solve |a + t d| = radius for the entry and exit parameters.
+        let (qa, qb, qc) = (d.dot(d), 2.0 * a.dot(d), a.dot(a) - radius * radius);
+        if qa < 1e-6 {
+            continue;
+        }
+        let disc = qb * qb - 4.0 * qa * qc;
+        if disc <= 0.0 {
+            continue;
+        }
+        let root = disc.sqrt();
+        let t0 = ((-qb - root) / (2.0 * qa)).max(0.0);
+        let t1 = ((-qb + root) / (2.0 * qa)).min(1.0);
+        if t0 < t1 {
+            pieces.push([pair[0] + d * t0, pair[0] + d * t1]);
         }
     }
-    origin + direction * t.max(0.0)
+    pieces
 }
 /// The radar's size: a GTA V-style rectangle in the bottom-left corner.
 fn minimap_size(screen: Rect) -> Vec2 {
-    let height = (screen.height() * 0.2).clamp(130.0, 210.0);
-    Vec2::new(height * 1.5, height)
+    Vec2::splat((screen.height() * 0.22).clamp(140.0, 230.0))
 }
 /// A GTA V-style line: a dark outline under the colour.
 fn route_line(painter: &egui::Painter, pieces: &[[Pos2; 2]], color: Color32, width: f32) {
@@ -325,6 +359,10 @@ pub struct Menu {
     pub network_status: String,
     /// Game clock shown in the HUD, hours and minutes.
     pub clock: (u32, u32),
+    /// Area name at the player, from the original zone data.
+    pub zone: Option<String>,
+    /// Area last announced, and when (egui time) it changed.
+    zone_announced: (Option<String>, f64),
     pub ride_status: String,
     pub network_players: Vec<String>,
     pub network_active: bool,
@@ -667,6 +705,8 @@ impl Menu {
             browser_status: String::new(),
             network_status: "Offline".into(),
             clock: (12, 0),
+            zone: None,
+            zone_announced: (None, f64::NEG_INFINITY),
             ride_status: String::new(),
             network_players: Vec::new(),
             network_active: false,
@@ -872,44 +912,44 @@ impl Menu {
         dt: f32,
     ) {
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-        let painter = ui.painter_at(rect);
-        let origin = Pos2::new(rect.center().x, rect.top() + rect.height() * 0.64);
+        let painter = ui.painter_at(rect.expand(2.0));
+        // Round San Andreas-style radar centred on the player.
+        let origin = rect.center();
+        let radius = rect.width().min(rect.height()) * 0.5 - 3.0;
         let range = radar_range(car_speed, self.settings.minimap_zoom);
         self.radar_range = if self.radar_range > 0.0 {
             self.radar_range + (range - self.radar_range) * (1.0 - (-2.5 * dt).exp())
         } else {
             range
         };
-        let map_scale = (origin.y - rect.top()) / self.radar_range;
+        let map_scale = radius / self.radar_range;
         let center = [coordinates[0], coordinates[1]];
         let to_radar = |xy: [f32; 2]| {
             origin + radar_offset(xy[0] - center[0], xy[1] - center[1], yaw, map_scale)
         };
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(52, 76, 94));
-        // add_radar_tile draws around the rect centre; shift it to `origin`.
-        let shifted = rect.translate(origin - rect.center());
-        let clip = [
-            rect.left_top(),
-            rect.right_top(),
-            rect.right_bottom(),
-            rect.left_bottom(),
-        ];
+        painter.circle_filled(origin, radius, Color32::from_rgb(52, 76, 94));
+        let circle: Vec<Pos2> = (0..64)
+            .map(|index| {
+                origin + Vec2::angled(index as f32 * std::f32::consts::TAU / 64.0) * radius
+            })
+            .collect();
         for tile in radar_tiles {
-            add_radar_tile(&painter, *tile, shifted, center, yaw, map_scale, &clip);
+            add_radar_tile(&painter, *tile, rect, center, yaw, map_scale, &circle);
         }
         let route: Vec<Pos2> = self.overlay.route.iter().map(|xy| to_radar(*xy)).collect();
         route_line(
             &painter,
-            &clip_line(&route, rect.shrink(1.0)),
+            &clip_line_circle(&route, origin, radius - 1.0),
             self.overlay.route_color,
             3.5,
         );
-        let edge = rect.shrink(7.0);
+        let edge = radius - 7.0;
         let place = |point: Pos2| {
-            if edge.contains(point) {
+            let offset = point - origin;
+            if offset.length() <= edge {
                 (point, false)
             } else {
-                (clamp_towards(origin, point, edge), true)
+                (origin + offset.normalized() * edge, true)
             }
         };
         for blip in &self.overlay.blips {
@@ -929,25 +969,16 @@ impl Menu {
             let (at, _) = place(to_radar(waypoint));
             waypoint_pin(&painter, at, 8.0);
         }
-        let north = clamp_towards(
-            origin,
-            origin + radar_offset(0.0, 1.0, yaw, 2000.0),
-            rect.shrink(10.0),
-        );
-        painter.circle_filled(north, 8.0, Color32::from_black_alpha(200));
+        player_arrow(&painter, origin, Vec2::new(0.0, -1.0), 8.0);
+        painter.circle_stroke(origin, radius + 1.5, egui::Stroke::new(4.0, Color32::BLACK));
+        let north = origin + radar_offset(0.0, 1.0, yaw, 1.0).normalized() * (radius + 1.5);
+        painter.circle_filled(north, 9.0, Color32::BLACK);
         painter.text(
             north,
             egui::Align2::CENTER_CENTER,
             "N",
-            FontId::proportional(11.0),
+            FontId::proportional(12.0),
             WHITE,
-        );
-        player_arrow(&painter, origin, Vec2::new(0.0, -1.0), 8.0);
-        painter.rect_stroke(
-            rect,
-            0.0,
-            egui::Stroke::new(2.0, Color32::from_black_alpha(220)),
-            egui::StrokeKind::Inside,
         );
     }
     pub fn draw(
@@ -997,17 +1028,17 @@ impl Menu {
                     )
                     .interactable(false)
                     .show(ctx, |ui| {
-                        ui.label(
-                            RichText::new(format!("{:02}:{:02}", self.clock.0, self.clock.1))
-                                .size(30.0 * scale)
-                                .color(WHITE)
-                                .strong(),
+                        outlined_text(
+                            ui,
+                            &format!("{:02}:{:02}", self.clock.0, self.clock.1),
+                            FontId::new(34.0 * scale, FontFamily::Name("menu".into())),
+                            WHITE,
                         );
                     });
                 egui::Area::new("freeroam-hud".into())
                     .fixed_pos(Pos2::new(
                         28.0,
-                        screen.bottom() - 84.0 - if self.settings.show_minimap { minimap_size(screen).y } else { 0.0 },
+                        screen.bottom() - 96.0 - if self.settings.show_minimap { minimap_size(screen).y } else { 0.0 },
                     ))
                     .interactable(false)
                     .show(ctx, |ui| {
@@ -1030,7 +1061,7 @@ impl Menu {
             }
             if self.settings.show_hud && self.settings.show_minimap {
                 egui::Area::new("freeroam-minimap".into())
-                    .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(28.0, -28.0))
+                    .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(28.0, -36.0))
                     .interactable(false)
                     .show(ctx, |ui| {
                         let dt = ui.input(|input| input.stable_dt).min(0.1);
@@ -1044,6 +1075,47 @@ impl Menu {
                             dt,
                         );
                     });
+            }
+            if self.settings.show_hud {
+                let now = ctx.input(|input| input.time);
+                if self.zone != self.zone_announced.0 {
+                    self.zone_announced = (self.zone.clone(), now);
+                }
+                // San Andreas announces a new area in the bottom right, then fades it.
+                let age = now - self.zone_announced.1;
+                if let (Some(zone), true) = (&self.zone, age < 5.0) {
+                    let alpha = (((5.0 - age) / 0.8).min(1.0) * 255.0) as u8;
+                    egui::Area::new("freeroam-zone".into())
+                        .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-30.0, -78.0 * scale))
+                        .interactable(false)
+                        .show(ctx, |ui| {
+                            outlined_text(
+                                ui,
+                                zone,
+                                FontId::new(40.0 * scale, FontFamily::Name("street".into())),
+                                Color32::from_rgba_unmultiplied(160, 200, 255, alpha),
+                            );
+                        });
+                    ctx.request_repaint();
+                }
+                if let (Some(zone), true) = (&self.zone, self.settings.show_minimap) {
+                    egui::Area::new("freeroam-zone-label".into())
+                        .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(28.0, -6.0))
+                        .interactable(false)
+                        .show(ctx, |ui| {
+                            egui::Frame::new()
+                                .fill(Color32::from_black_alpha(170))
+                                .inner_margin(egui::Margin::symmetric(8, 2))
+                                .show(ui, |ui| {
+                                    ui.set_width(minimap_size(screen).x - 16.0);
+                                    ui.vertical_centered(|ui| {
+                                        ui.label(
+                                            RichText::new(zone).size(15.0 * scale).color(WHITE),
+                                        );
+                                    });
+                                });
+                        });
+                }
             }
             if self.settings.show_hud && self.settings.show_speedometer {
                 if let Some(speed) = car_speed {
@@ -1800,18 +1872,16 @@ mod tests {
     #[test]
     fn radar_helpers_clip_lines_and_pull_blips_to_the_edge() {
         let area = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 50.0));
-        let origin = Pos2::new(50.0, 30.0);
-        assert_eq!(
-            clamp_towards(origin, Pos2::new(250.0, 30.0), area),
-            Pos2::new(100.0, 30.0)
+        let centre = Pos2::new(50.0, 50.0);
+        let pieces = clip_line_circle(
+            &[Pos2::new(-100.0, 50.0), Pos2::new(200.0, 50.0)],
+            centre,
+            20.0,
         );
+        assert_eq!(pieces.len(), 1);
+        assert!((pieces[0][0].x - 30.0).abs() < 1e-3 && (pieces[0][1].x - 70.0).abs() < 1e-3);
         assert!(
-            clamp_towards(origin, Pos2::new(50.0, -70.0), area).distance(Pos2::new(50.0, 0.0))
-                < 1e-4
-        );
-        assert_eq!(
-            clamp_towards(origin, Pos2::new(60.0, 35.0), area),
-            Pos2::new(60.0, 35.0)
+            clip_line_circle(&[Pos2::new(0.0, 0.0), Pos2::new(10.0, 0.0)], centre, 20.0).is_empty()
         );
         let pieces = clip_line(&[Pos2::new(10.0, 10.0), Pos2::new(300.0, 10.0)], area);
         assert!(!pieces.is_empty());
