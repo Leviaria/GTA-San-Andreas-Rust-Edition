@@ -255,6 +255,39 @@ struct Wire {
     last: Instant,
     closed: bool,
 }
+impl Drop for Wire {
+    // Closing a socket with unread input makes Windows send a reset, which
+    // can discard a Reject the peer has not read yet. Close the sending side
+    // and drain the input briefly so the last message arrives.
+    fn drop(&mut self) {
+        if self.closed || self.stream.shutdown(std::net::Shutdown::Write).is_err() {
+            return;
+        }
+        let Ok(mut stream) = self.stream.try_clone() else {
+            return;
+        };
+        let _ = thread::Builder::new()
+            .name("wire-close".into())
+            .spawn(move || {
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut buffer = [0_u8; 4096];
+                while Instant::now() < deadline {
+                    match stream.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) => {}
+                        Err(_) => break,
+                    }
+                }
+            });
+    }
+}
 impl Wire {
     fn new(stream: TcpStream) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
