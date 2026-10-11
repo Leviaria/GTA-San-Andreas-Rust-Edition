@@ -362,7 +362,10 @@ fn rejected_or_disabled_migration_gives_a_new_character() {
     assert_eq!(cash(&player), "$500");
     // The old character stays untouched for a later decision, and an admin
     // can still give it back over the new one.
-    assert_eq!(server.kvp()[format!("license:license:{legacy}")], "OLDCHAR1");
+    assert_eq!(
+        server.kvp()[format!("license:license:{legacy}")],
+        "OLDCHAR1"
+    );
     server.run(&format!("sarebox_migrate {id}"));
     server.until(&mut [&mut player], "the old character", |_, p| {
         cash(p[0]) == "$4242"
@@ -374,4 +377,200 @@ fn rejected_or_disabled_migration_gives_a_new_character() {
     let player = server.join();
     assert_eq!(cash(&player), "$500");
     assert!(!server.output().contains("claims"));
+}
+
+/// One dispatch point 370 m north of the default position (2500, -1670),
+/// with limits that keep the test short.
+const TAXI_CONFIG: &str = r#"
+TaxiConfig = {
+  Job = 'taxi', Account = 'cash',
+  Fare = { Base = 40, PerMeter = 0.12, Max = 450 },
+  Radius = 12.0, MinDistance = 250.0, MaxDistance = 3000.0,
+  MaxSpeed = 100.0, TimeLimit = 600, Cooldown = 2,
+  Points = { { label = 'North Point', x = 2500.0, y = -1300.0, z = 0.0 } },
+}
+"#;
+const START: [f32; 3] = [2500.0, -1670.0, 0.0];
+const POINT: [f32; 3] = [2500.0, -1300.0, 0.0];
+
+fn taxi_server() -> Sarebox {
+    Sarebox::boot(&[], |root| {
+        std::fs::write(
+            root.join("resources/[sarebox]/sarebox_taxi/config.lua"),
+            TAXI_CONFIG,
+        )
+        .unwrap();
+    })
+}
+fn notified(player: &Player, text: &str) -> bool {
+    player
+        .host
+        .ui()
+        .notifications
+        .iter()
+        .any(|n| n.description.contains(text))
+}
+/// Pick a taxi menu option by title, as a player clicking it would.
+fn taxi_menu(server: &mut Sarebox, player: &mut Player, title: &str) {
+    player.command("/taxi");
+    let index = {
+        let ui = player.host.ui();
+        let menu = ui.context.as_ref().expect("taxi menu");
+        menu.options
+            .iter()
+            .position(|o| o.title == title)
+            .unwrap_or_else(|| panic!("no option {title}: {menu:?}"))
+    };
+    player.host.select_context(index);
+    server.step(&mut [player]);
+}
+/// Drive in a straight line at `speed` m/s until `to`.
+fn drive(server: &mut Sarebox, player: &mut Player, to: [f32; 3], speed: f32) {
+    let mut at = natives::world_position(&player.pose);
+    let mut last = Instant::now();
+    let start = Instant::now();
+    loop {
+        let (dx, dy) = (to[0] - at[0], to[1] - at[1]);
+        let left = (dx * dx + dy * dy).sqrt();
+        if left < 1.0 {
+            break;
+        }
+        let step = (speed * last.elapsed().as_secs_f32()).min(left);
+        last = Instant::now();
+        at = [at[0] + dx / left * step, at[1] + dy / left * step, to[2]];
+        player.place(at, true);
+        server.step(&mut [player]);
+        assert!(start.elapsed() < Duration::from_secs(20), "drive timed out");
+    }
+}
+
+#[test]
+fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
+    let mut server = taxi_server();
+    assert!(server.shared.borrow().resources["sarebox_taxi"].started);
+    let mut player = server.join();
+    player.place(START, true);
+
+    // Only taxi drivers get runs; signing up is checked on the server.
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the refusal", |_, p| {
+        notified(p[0], "Only on-duty taxi drivers")
+    });
+    taxi_menu(&mut server, &mut player, "Sign up as a taxi driver");
+    server.until(&mut [&mut player], "the taxi job", |_, p| {
+        p[0].text().contains("Taxi - Recruit")
+    });
+    // Not in a car: no run.
+    player.place(START, false);
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the car check", |_, p| {
+        notified(p[0], "Get in a car first")
+    });
+
+    // A run: the server names the point and the fare (40 + 370 * 0.12).
+    player.place(START, true);
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the route", |_, p| {
+        p[0].text().contains("Taxi: drive to North Point")
+    });
+    assert!(
+        player.text().contains("370 m north  |  fare $84"),
+        "{}",
+        player.text()
+    );
+
+    // Made-up events cannot pay, and teleporting there ends the run unpaid.
+    for (name, payload) in [
+        ("sarebox_taxi:server:finish", "[9999]"),
+        ("sarebox_taxi:server:arrived", "[]"),
+        ("sarebox:server:moneyChanged", "[1, \"cash\", 9999]"),
+    ] {
+        player.client.trigger(None, name, payload).unwrap();
+    }
+    player.place(POINT, true);
+    server.until(&mut [&mut player], "the teleport check", |_, p| {
+        notified(p[0], "position jumped")
+    });
+    assert!(!player.text().contains("Taxi:"));
+    assert_eq!(cash(&player), "$500");
+
+    // Driving there in time is paid once, and the menu no longer offers a
+    // cancel for a finished run.
+    player.place(START, true);
+    server.idle(&mut [&mut player], 120); // the server sees the car back
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the route", |_, p| {
+        p[0].text().contains("Taxi: drive to")
+    });
+    drive(&mut server, &mut player, POINT, 85.0);
+    server.until(&mut [&mut player], "the fare", |_, p| cash(p[0]) == "$584");
+    assert!(notified(&player, "Paid $84"));
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the cooldown", |_, p| {
+        notified(p[0], "nothing for you yet")
+    });
+    server.idle(&mut [&mut player], 100);
+    assert_eq!(cash(&player), "$584");
+
+    // Too fast for the distance: not paid.
+    drive(&mut server, &mut player, START, 85.0);
+    thread::sleep(Duration::from_secs(2));
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the route", |_, p| {
+        p[0].text().contains("Taxi: drive to")
+    });
+    drive(&mut server, &mut player, POINT, 190.0);
+    server.until(&mut [&mut player], "the speed check", |_, p| {
+        notified(p[0], "impossibly fast")
+    });
+    assert_eq!(cash(&player), "$584");
+
+    // Going off duty cancels the run.
+    player.place(START, true);
+    server.idle(&mut [&mut player], 120);
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the route", |_, p| {
+        p[0].text().contains("Taxi: drive to")
+    });
+    player
+        .client
+        .trigger(None, "sarebox:server:toggleDuty", "[]")
+        .unwrap();
+    server.until(&mut [&mut player], "the duty check", |_, p| {
+        notified(p[0], "no longer an on-duty taxi driver")
+    });
+    assert!(!player.text().contains("Taxi:"));
+    player
+        .client
+        .trigger(None, "sarebox:server:toggleDuty", "[]")
+        .unwrap();
+
+    // Restarting the resource mid-run cancels it and clears the directions.
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the route", |_, p| {
+        p[0].text().contains("Taxi: drive to")
+    });
+    server.run("restart sarebox_taxi");
+    server.until(&mut [&mut player], "the restart", |_, p| {
+        notified(p[0], "Taxi dispatch restarted") && !p[0].text().contains("Taxi:")
+    });
+    drive(&mut server, &mut player, POINT, 85.0);
+    server.idle(&mut [&mut player], 100);
+    assert_eq!(cash(&player), "$584");
+
+    // Leaving mid-run ends it: nothing is paid on return.
+    drive(&mut server, &mut player, START, 85.0);
+    taxi_menu(&mut server, &mut player, "Take a dispatch");
+    server.until(&mut [&mut player], "the route", |_, p| {
+        p[0].text().contains("Taxi: drive to")
+    });
+    server.leave(player);
+    let mut player = server.join();
+    player.place(POINT, true);
+    server.idle(&mut [&mut player], 100);
+    assert_eq!(cash(&player), "$584");
+    assert!(!player.text().contains("Taxi:"));
+    // The fare was saved with the character.
+    let saved = server.kvp().to_string();
+    assert!(saved.contains("\\\"cash\\\":584"), "{saved}");
 }
