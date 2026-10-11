@@ -7,6 +7,17 @@ SareBox = Core
 
 local function kvpKey(citizenid) return ('player:%s'):format(citizenid) end
 
+-- Money amounts are whole dollars. Anything else (fractions, NaN, infinity,
+-- strings that are not numbers, huge values) is refused, whoever asks.
+local function wholeAmount(value, allowZero)
+  local n = tonumber(value)
+  if not n or n ~= n or n == math.huge or n == -math.huge then return nil end
+  if n ~= math.floor(n) or n > Config.MaxMoney then return nil end
+  if n < 0 or (n == 0 and not allowZero) then return nil end
+  return math.tointeger(n)
+end
+local function validAccount(data, account) return type(account) == 'string' and type(data.money[account]) == 'number' end
+
 local function newCitizenId()
   local chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
   while true do
@@ -61,25 +72,33 @@ local function createPlayer(src, data)
     TriggerClientEvent('sarebox:client:setPlayerData', src, data)
   end
 
+  -- Saves into resource KVP. The server writes KVP to disk within about a
+  -- second, atomically (see docs/sarebox.md, "When data is saved").
   function self.Functions.Save()
     if not data.license then return false end
-    local coords = GetEntityCoords(GetPlayerPed(src))
-    if coords and (coords.x ~= 0 or coords.y ~= 0) then
-      data.position = { x = coords.x, y = coords.y, z = coords.z, heading = GetEntityHeading(GetPlayerPed(src)) }
+    if DoesPlayerExist(src) then
+      local coords = GetEntityCoords(GetPlayerPed(src))
+      if coords and (coords.x ~= 0 or coords.y ~= 0) then
+        data.position = { x = coords.x, y = coords.y, z = coords.z, heading = GetEntityHeading(GetPlayerPed(src)) }
+      end
     end
     local copy = table.clone(data)
     copy.source = nil
-    SetResourceKvp(kvpKey(data.citizenid), json.encode(copy))
+    local ok, err = pcall(SetResourceKvp, kvpKey(data.citizenid), json.encode(copy))
+    if not ok then
+      print(('^1Could not save character %s: %s^7'):format(data.citizenid, err))
+      return false
+    end
     return true
   end
 
   function self.Functions.GetMoney(account) return data.money[account] end
 
-  local function changeMoney(account, amount, reason, sign)
-    amount = math.floor(tonumber(amount) or 0)
-    if amount <= 0 or data.money[account] == nil then return false end
+  local function changeMoney(account, value, reason, sign)
+    local amount = wholeAmount(value, false)
+    if not amount or not validAccount(data, account) then return false end
     local new = data.money[account] + sign * amount
-    if new < 0 then return false end
+    if new < 0 or new > Config.MaxMoney then return false end
     data.money[account] = new
     sync()
     self.Functions.Save()
@@ -89,9 +108,9 @@ local function createPlayer(src, data)
   end
   function self.Functions.AddMoney(account, amount, reason) return changeMoney(account, amount, reason, 1) end
   function self.Functions.RemoveMoney(account, amount, reason) return changeMoney(account, amount, reason, -1) end
-  function self.Functions.SetMoney(account, amount, reason)
-    amount = math.floor(tonumber(amount) or -1)
-    if amount < 0 or data.money[account] == nil then return false end
+  function self.Functions.SetMoney(account, value, reason)
+    local amount = wholeAmount(value, true)
+    if not amount or not validAccount(data, account) then return false end
     local delta = amount - data.money[account]
     data.money[account] = amount
     sync()
@@ -147,6 +166,8 @@ end
 -- Load the character saved for this license, or create one. Players without
 -- a license (an old game build) get a character that is not saved.
 function Core.Functions.Login(src)
+  -- Repeated joins or a restart racing a join keep the loaded character.
+  if Players[src] then return Players[src] end
   local license = GetPlayerIdentifierByType(src, 'license')
   local data
   if license then
@@ -157,7 +178,11 @@ function Core.Functions.Login(src)
       data.name = GetPlayerName(src)
       data.job = jobData(data.job and data.job.name, data.job and data.job.grade and data.job.grade.level)
         or jobData('unemployed', 0)
-      data.metadata = data.metadata or {}
+      data.metadata = type(data.metadata) == 'table' and data.metadata or {}
+      data.money = type(data.money) == 'table' and data.money or {}
+      for name, start in pairs(Config.StartMoney) do
+        if type(data.money[name]) ~= 'number' then data.money[name] = start end
+      end
     else
       citizenid = newCitizenId()
       SetResourceKvp(('license:%s'):format(license), citizenid)

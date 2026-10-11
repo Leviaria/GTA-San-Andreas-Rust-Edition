@@ -240,7 +240,12 @@ pub fn tick(shared: &Shared) {
 }
 
 pub fn flush_kvp(shared: &Shared, force: bool) {
-    let errors = shared.borrow_mut().kvp.flush(force);
+    let errors = {
+        let mut state = shared.borrow_mut();
+        let mut lines = state.kvp.take_warnings();
+        lines.extend(state.kvp.flush(force));
+        lines
+    };
     for error in errors {
         out(shared, error);
     }

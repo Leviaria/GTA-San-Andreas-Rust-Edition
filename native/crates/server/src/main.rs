@@ -117,6 +117,17 @@ fn main() -> Result<()> {
         );
     }
     let mut restart = false;
+    // Ctrl+C and SIGTERM (systemd, hosting panels) stop the server like
+    // `quit`: resources stop, players are saved and KVP is written.
+    let signalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let signalled = signalled.clone();
+        if let Err(error) = ctrlc::set_handler(move || {
+            signalled.store(true, std::sync::atomic::Ordering::Relaxed)
+        }) {
+            out(&shared, format!("Cannot catch Ctrl+C: {error}"));
+        }
+    }
 
     let mut known: BTreeMap<u32, String> = BTreeMap::new();
     let mut published = String::new();
@@ -159,6 +170,9 @@ fn main() -> Result<()> {
                     ),
                 }
             }
+        }
+        if signalled.swap(false, std::sync::atomic::Ordering::Relaxed) && console.quit.is_none() {
+            console.quit = Some("Server stopped by the host.".into());
         }
         if let Some(reason) = console.quit.take() {
             out(&shared, format!("Stopping server: {reason}"));
