@@ -97,3 +97,35 @@ struct ShadowOut {
 @fragment fn fs_shadow(input: ShadowOut) {
     if (textureSample(image, image_sampler, input.uv).a * input.alpha < 0.5) { discard; }
 }
+// Night glows from original 2DFX lights, drawn additively after the scene.
+// Colour alpha 1 marks night-only lights, 0.5 always-lit ones.
+fn glow_visibility(alpha: f32) -> f32 {
+    let night = 1.0 - camera.sun.w;
+    return select(night, max(night, 0.35), alpha < 0.75);
+}
+@vertex fn vs_corona(input: VertexIn) -> VertexOut {
+    let to_eye = camera.eye.xyz - input.position;
+    let distance = max(length(to_eye), 0.001);
+    let forward = to_eye / distance;
+    let right = normalize(cross(vec3<f32>(0.0, 1.0, 0.0), forward) + vec3<f32>(1e-5, 0.0, 0.0));
+    let up = cross(forward, right);
+    // Pull the sprite towards the camera so the lamp does not hide its glow,
+    // and grow it gently with distance so far lamps stay visible.
+    let centre = input.position + forward * min(0.6, distance * 0.5);
+    let world = centre + (right * input.uv.x + up * input.uv.y) * (1.0 + distance * 0.004);
+    var out: VertexOut;
+    out.position = camera.view_projection * vec4<f32>(world, 1.0);
+    out.uv = sign(input.uv);
+    out.color = input.color;
+    out.world_position = world;
+    return out;
+}
+@fragment fn fs_corona(input: VertexOut) -> @location(0) vec4<f32> {
+    let r2 = dot(input.uv, input.uv);
+    let falloff = max(exp(-r2 * 4.0) - exp(-4.0), 0.0);
+    return vec4<f32>(input.color.rgb * falloff * glow_visibility(input.color.a) * 1.6, 1.0);
+}
+@fragment fn fs_pool(input: VertexOut) -> @location(0) vec4<f32> {
+    let edge = max(1.0 - dot(input.uv, input.uv), 0.0);
+    return vec4<f32>(input.color.rgb * edge * edge * glow_visibility(input.color.a) * 0.45, 1.0);
+}

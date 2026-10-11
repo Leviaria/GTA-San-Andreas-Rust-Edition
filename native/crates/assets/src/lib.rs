@@ -2,6 +2,7 @@
 pub mod col;
 pub mod game_path;
 pub mod ifp;
+pub mod light;
 pub mod roadsign;
 pub mod skin;
 pub mod uvanim;
@@ -180,6 +181,8 @@ pub struct Geometry {
     pub materials: Vec<Material>,
     /// Original roadsign effects use baked world positions, independent of atomic frames.
     pub road_signs: Vec<roadsign::RoadSign>,
+    /// 2DFX lights in model space.
+    pub lights: Vec<light::Light>,
 }
 fn mat_list(
     data: &[u8],
@@ -330,6 +333,7 @@ fn geometry(
         triangles,
         materials,
         road_signs: roadsign::from_geometry(data)?,
+        lights: light::from_geometry(data),
     })
 }
 fn transform(m: &[f32; 12], v: [f32; 3], translation: bool) -> [f32; 3] {
@@ -513,6 +517,7 @@ fn decode_dff_parts(
         let mut g = geometries[gi].clone();
         if std::mem::replace(&mut effects_seen[gi], true) {
             g.road_signs.clear();
+            g.lights.clear();
         }
         for v in &mut g.positions {
             *v = transform(&frames[fi], *v, true);

@@ -36,8 +36,12 @@ live and persist, except renderer and texture-filter changes which require resta
   built-in colours if it cannot be read. The sun rises in the east at 06:00
   and sets in the west at 20:00; a dimmer moon lights the night, and shadows
   fade around sunrise and sunset. Night darkening scales the day-baked prelit
-  colours; SA's separate night vertex colours, lit windows and street lights
-  are not used yet. Weather and multiplayer time sync are not implemented.
+  colours; SA's separate night vertex colours are not used yet.
+- Night lights: street lamps and other 2DFX light records in the original
+  models get additive coronas and soft light pools on the ground below them,
+  fading in as daylight drops. The player's car gets headlight coronas and a
+  light pool on the road ahead. These are decals, not real-time point lights:
+  they do not light walls, cars or peds. Weather and multiplayer time sync are not implemented.
 - FXAA, adjustable sharpening, a small bright-pass bloom filter, exposure,
   saturation, vignette and outdoor distance haze. Fog is disabled indoors.
 - A linear RGBA16F intermediate scene target and filmic display mapping.
