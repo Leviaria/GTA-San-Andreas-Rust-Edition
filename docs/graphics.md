@@ -23,6 +23,12 @@ live and persist, except renderer and texture-filter changes which require resta
   of the original prelit vertex colors. Face normals come from screen-space
   derivatives, so moving cars and peds are lit without extra vertex data.
   Interiors are unaffected and 0% restores the original look.
+- Sun shadows (on except in Performance): a 2048² orthographic depth map
+  covers 180 m around the player, snapped to texels, with alpha-tested casters
+  so foliage casts shaped shadows. 3×3 PCF softens edges and the shadow fades
+  out at the border. It renders nearby geometry a second time. Interiors skip it.
+  `--probe-shadows --renderer vulkan` (also a unit test) renders an owned scene through the real
+  shaders (skipped without a GPU adapter; lavapipe works).
 - FXAA, adjustable sharpening, a small bright-pass bloom filter, exposure,
   saturation, vignette and outdoor distance haze. Fog is disabled indoors.
 - A linear RGBA16F intermediate scene target and filmic display mapping.
@@ -41,8 +47,7 @@ live and persist, except renderer and texture-filter changes which require resta
   Original radio playback is still pending.
 
 Original SA vertex lighting and textures remain the scene material basis.
-The post-processing pass does not replace them with PBR materials or add
-dynamic shadows. No performance improvement percentage is claimed.
+The post-processing pass does not replace them with PBR materials. No performance improvement percentage is claimed.
 
 ## DLSS and temporal FSR
 

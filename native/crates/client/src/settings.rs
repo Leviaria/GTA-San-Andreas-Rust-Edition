@@ -49,6 +49,7 @@ pub struct Settings {
     pub vignette: f32,
     pub atmospheric_fog: bool,
     pub sun_lighting: f32,
+    pub sun_shadows: bool,
     pub fsr1: bool,
     pub renderer: Renderer,
     pub fps_limit: u32,
@@ -81,6 +82,7 @@ impl Default for Settings {
             vignette: 0.12,
             atmospheric_fog: true,
             sun_lighting: 0.35,
+            sun_shadows: true,
             fsr1: true,
             renderer: Renderer::Auto,
             fps_limit: 0,
@@ -177,6 +179,7 @@ impl Settings {
         self.vignette = 0.12;
         self.atmospheric_fog = true;
         self.sun_lighting = 0.35;
+        self.sun_shadows = index > 0;
         self.texture_anisotropy = [1, 4, 8, 16][index.min(3)];
     }
     pub fn preset(&self) -> &'static str {

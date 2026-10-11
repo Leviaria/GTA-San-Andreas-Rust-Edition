@@ -383,6 +383,7 @@ impl Menu {
                 ("Vignette", format!("{:.0}%", s.vignette * 100.0), "Subtle shading at the edges of the image. Set to zero for a uniform frame."),
                 ("Atmospheric haze", on(s.atmospheric_fog), "Distant outdoor scenery fades into the horizon. Interiors stay clear."),
                 ("Sun lighting", format!("{:.0}%", s.sun_lighting * 100.0), "Shades outdoor surfaces by how they face the sun, on top of the original baked lighting. Zero keeps the original look."),
+                ("Sun shadows", on(s.sun_shadows), "Buildings, trees, cars and people cast shadows near you outdoors. Renders the nearby scene a second time; off in the Performance preset."),
                 ("Texture filtering", if s.texture_anisotropy == 1 { "Trilinear".into() } else { format!("{}x anisotropic", s.texture_anisotropy) }, "Keeps road and building textures clearer at shallow angles. Mipmaps reduce distant texture shimmer. Requires restart."),
             ],
             SettingsTab::Gameplay => vec![
@@ -467,7 +468,8 @@ impl Menu {
             (SettingsTab::Graphics, 9) => s.vignette += delta * 0.02,
             (SettingsTab::Graphics, 10) => s.atmospheric_fog = !s.atmospheric_fog,
             (SettingsTab::Graphics, 11) => s.sun_lighting += delta * 0.05,
-            (SettingsTab::Graphics, 12) => {
+            (SettingsTab::Graphics, 12) => s.sun_shadows = !s.sun_shadows,
+            (SettingsTab::Graphics, 13) => {
                 let values = [1, 2, 4, 8, 16];
                 let index = values
                     .iter()

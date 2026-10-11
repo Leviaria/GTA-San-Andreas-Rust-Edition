@@ -22,6 +22,7 @@ mod script_ui;
 mod server_events;
 mod session_resources;
 mod settings;
+mod shadow;
 mod streaming;
 mod upload;
 use streaming::{Streamer, ORIGIN, RADIUS};
@@ -69,6 +70,8 @@ struct State {
     camera_group: wgpu::BindGroup,
     opaque: wgpu::RenderPipeline,
     blended: wgpu::RenderPipeline,
+    shadows: shadow::Shadows,
+    light_frustum: culling::Frustum,
     batches: Vec<GpuBatch>,
     position: Vec3,
     yaw: f32,
@@ -310,7 +313,7 @@ impl State {
         });
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
-            size: 96,
+            size: 160,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -356,16 +359,27 @@ impl State {
                 },
             ],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("SA layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&image_layout)],
-            immediate_size: 0,
-        });
         let vertex = wgpu::VertexBufferLayout {
             array_stride: 36,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Float32x4],
         };
+        let shadows = shadow::Shadows::new(
+            &device,
+            &shader,
+            &camera_layout,
+            &image_layout,
+            vertex.clone(),
+        );
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("SA layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&image_layout),
+                Some(&shadows.layout),
+            ],
+            immediate_size: 0,
+        });
         let make_pipeline = |alpha: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(if alpha { "SA alpha" } else { "SA opaque" }),
@@ -509,6 +523,8 @@ impl State {
             camera_group,
             opaque,
             blended,
+            shadows,
+            light_frustum: culling::Frustum::default(),
             batches,
             position: if let Some(ref cut) = animation {
                 if cut.camera_keys.is_some() {
@@ -1316,10 +1332,50 @@ impl State {
                 } else {
                     0.0
                 },
-                0.0,
+                if self.shadows_active() { 1.0 } else { 0.0 },
                 0.0,
             ]),
         );
+        let light = shadow::light_matrix(self.position);
+        self.light_frustum = culling::Frustum::new(light);
+        self.queue.write_buffer(
+            &self.camera,
+            96,
+            bytemuck::cast_slice(&light.to_cols_array()),
+        );
+    }
+    /// World batches inside `frustum`, followed by every car and ped.
+    fn drawn_batches<'a>(
+        &'a self,
+        frustum: &'a culling::Frustum,
+    ) -> impl Iterator<Item = &'a GpuBatch> + 'a {
+        self.batches
+            .iter()
+            .filter(move |batch| !self.culling_enabled || frustum.visible(batch.bounds))
+            .chain(self.car.iter().flat_map(|(_, b)| b))
+            .chain(self.spawned_peds.iter().flat_map(|p| &p.batches))
+            .chain(
+                self.remote_actors
+                    .iter()
+                    .filter(|a| a.visible)
+                    .flat_map(|a| {
+                        a.car
+                            .iter()
+                            .filter(|_| a.car_visible)
+                            .chain(a.ped.iter().filter(|_| a.ped_visible))
+                    }),
+            )
+            .chain(
+                self.ped
+                    .iter()
+                    .filter(|_| {
+                        self.third_person && self.walking && !self.driving && self.ped_visible
+                    })
+                    .flat_map(|(_, b)| b),
+            )
+    }
+    fn shadows_active(&self) -> bool {
+        self.interior == 0 && self.menu.settings.sun_shadows
     }
     fn respawn(&mut self) {
         self.leave_passenger();
@@ -1750,6 +1806,30 @@ impl State {
             &paint_jobs,
             &screen,
         );
+        if self.shadows_active() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sun shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadows.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadows.pipeline);
+            pass.set_bind_group(0, &self.camera_group, &[]);
+            for b in self.drawn_batches(&self.light_frustum) {
+                pass.set_bind_group(1, &b.texture, &[]);
+                pass.set_vertex_buffer(0, b.buffer.slice(..));
+                pass.draw(0..b.count, 0..1);
+            }
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("SA world"),
@@ -1780,34 +1860,10 @@ impl State {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.camera_group, &[]);
+            pass.set_bind_group(2, &self.shadows.group, &[]);
             let mut alpha = false;
             pass.set_pipeline(&self.opaque);
-            for b in self
-                .batches
-                .iter()
-                .filter(|batch| !self.culling_enabled || self.frustum.visible(batch.bounds))
-                .chain(self.car.iter().flat_map(|(_, b)| b))
-                .chain(self.spawned_peds.iter().flat_map(|p| &p.batches))
-                .chain(
-                    self.remote_actors
-                        .iter()
-                        .filter(|a| a.visible)
-                        .flat_map(|a| {
-                            a.car
-                                .iter()
-                                .filter(|_| a.car_visible)
-                                .chain(a.ped.iter().filter(|_| a.ped_visible))
-                        }),
-                )
-                .chain(
-                    self.ped
-                        .iter()
-                        .filter(|_| {
-                            self.third_person && self.walking && !self.driving && self.ped_visible
-                        })
-                        .flat_map(|(_, b)| b),
-                )
-            {
+            for b in self.drawn_batches(&self.frustum) {
                 if b.alpha != alpha {
                     pass.set_pipeline(if b.alpha { &self.blended } else { &self.opaque });
                     alpha = b.alpha;
@@ -3584,7 +3640,10 @@ fn main() -> Result<()> {
     let _session_intent =
         sa_client::launch::Session::from_args(&std::env::args().collect::<Vec<_>>())?;
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--probe-mipmaps") {
+    if args
+        .iter()
+        .any(|arg| arg == "--probe-mipmaps" || arg == "--probe-shadows")
+    {
         let renderer = args
             .windows(2)
             .find(|pair| pair[0] == "--renderer")
@@ -3596,6 +3655,15 @@ fn main() -> Result<()> {
             "auto" => settings::Renderer::Auto.backends(),
             _ => anyhow::bail!("Unknown renderer"),
         };
+        if args.iter().any(|arg| arg == "--probe-shadows") {
+            let (shadowed, sunny) = pollster::block_on(shadow::probe(backends))?;
+            println!("Sun shadow probe: shadowed {shadowed:.2}, sunny {sunny:.2}");
+            anyhow::ensure!(
+                sunny > 0.9 && shadowed < sunny * 0.75,
+                "shadow probe failed"
+            );
+            return Ok(());
+        }
         return pollster::block_on(mipmaps::probe(backends));
     }
     if let Some(pair) = args

@@ -1,7 +1,9 @@
-struct Camera { view_projection: mat4x4<f32>, eye: vec4<f32>, environment: vec4<f32> };
+struct Camera { view_projection: mat4x4<f32>, eye: vec4<f32>, environment: vec4<f32>, light: mat4x4<f32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
+@group(2) @binding(0) var shadow_map: texture_depth_2d;
+@group(2) @binding(1) var shadow_sampler: sampler_comparison;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -23,16 +25,36 @@ struct VertexOut {
     return out;
 }
 // environment.x: outdoor haze, environment.y: sun lighting strength (0 keeps the
-// original prelit look). The face normal comes from screen-space derivatives,
+// original prelit look), environment.z: sun shadow strength. The face normal comes from screen-space derivatives,
 // so moving cars and animated peds need no extra vertex data.
 const SUN: vec3<f32> = vec3<f32>(-0.42, 0.80, 0.43);
+fn sun_shadow(world_position: vec3<f32>) -> f32 {
+    let clip = camera.light * vec4<f32>(world_position, 1.0);
+    let uv = clip.xy * vec2<f32>(0.5, -0.5) + 0.5;
+    let texel = 1.0 / 2048.0;
+    var lit = 0.0;
+    for (var y = -1; y <= 1; y += 1) {
+        for (var x = -1; x <= 1; x += 1) {
+            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(f32(x), f32(y)) * texel, clip.z);
+        }
+    }
+    // Fade out towards the edge of the shadowed square instead of cutting off.
+    let edge = max(abs(clip.x), abs(clip.y));
+    let inside = 1.0 - smoothstep(0.85, 1.0, edge);
+    let covered = select(0.0, inside, clip.z > 0.0 && clip.z < 1.0);
+    return mix(1.0, lit / 9.0, covered);
+}
 fn sun_light(world_position: vec3<f32>) -> vec3<f32> {
     var normal = normalize(cross(dpdx(world_position), dpdy(world_position)));
     if (dot(normal, camera.eye.xyz - world_position) < 0.0) { normal = -normal; }
     let facing = max(dot(normal, normalize(SUN)), 0.0);
+    let shadow = sun_shadow(world_position);
     let sky = mix(vec3<f32>(0.62, 0.60, 0.58), vec3<f32>(0.72, 0.76, 0.84), normal.y * 0.5 + 0.5);
-    let lit = sky + vec3<f32>(1.0, 0.95, 0.86) * 0.45 * facing;
-    return mix(vec3<f32>(1.0), lit, camera.environment.y);
+    let lit = sky + vec3<f32>(1.0, 0.95, 0.86) * 0.45 * facing * shadow;
+    // Shadows also darken the original prelit colours, which already contain
+    // the sun, so they read clearly even with low sun lighting.
+    let shade = mix(1.0, 0.55, (1.0 - shadow) * camera.environment.z * smoothstep(0.0, 0.2, facing));
+    return mix(vec3<f32>(1.0), lit, camera.environment.y) * shade;
 }
 fn shade(color: vec4<f32>, input: VertexOut, light: vec3<f32>) -> vec4<f32> {
     let haze = (1.0 - exp(-distance(input.world_position, camera.eye.xyz) * 0.00045)) * camera.environment.x;
@@ -49,4 +71,19 @@ fn shade(color: vec4<f32>, input: VertexOut, light: vec3<f32>) -> vec4<f32> {
     let color = textureSample(image, image_sampler, input.uv) * input.color;
     if (color.a < 0.04) { discard; }
     return shade(color, input, light);
+}
+struct ShadowOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) alpha: f32,
+};
+@vertex fn vs_shadow(input: VertexIn) -> ShadowOut {
+    var out: ShadowOut;
+    out.position = camera.light * vec4<f32>(input.position, 1.0);
+    out.uv = input.uv;
+    out.alpha = input.color.a;
+    return out;
+}
+@fragment fn fs_shadow(input: ShadowOut) {
+    if (textureSample(image, image_sampler, input.uv).a * input.alpha < 0.5) { discard; }
 }
