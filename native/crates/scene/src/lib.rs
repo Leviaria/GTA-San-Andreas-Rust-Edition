@@ -1,5 +1,6 @@
 //! Manifest-ordered SA world placement and small bounded scene assembly.
 pub mod collision;
+pub mod handling;
 mod mods;
 pub use mods::{share_resource_folders, share_resources};
 pub mod ped;
@@ -414,9 +415,13 @@ pub fn load_car_model(game: &Path, model: &str) -> Result<Scene> {
         game,
         "models/generic/vehicle.txd",
     )?)?;
-    car_scene(&geometry, |name| {
+    let mut scene = car_scene(&geometry, |name| {
         decode_txd(&taxi, name).or_else(|_| decode_txd(&common, name))
-    })
+    })?;
+    if let Some(original) = handling::for_model(game, model) {
+        scene.vehicle_handling = original;
+    }
+    Ok(scene)
 }
 fn car_scene(
     geometry: &[Geometry],
