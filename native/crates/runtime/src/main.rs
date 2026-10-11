@@ -24,6 +24,7 @@ mod server_events;
 mod session_resources;
 mod settings;
 mod shadow;
+mod skids;
 mod streaming;
 mod upload;
 mod zones;
@@ -119,6 +120,9 @@ struct State {
     corona: wgpu::RenderPipeline,
     light_pool: wgpu::RenderPipeline,
     headlights: wgpu::Buffer,
+    skids: skids::Skids,
+    skid_buffer: wgpu::Buffer,
+    white: wgpu::BindGroup,
     shadows: shadow::Shadows,
     pub(crate) daycycle: daycycle::DayCycle,
     zones: zones::Zones,
@@ -519,6 +523,33 @@ impl State {
             })
         };
         let corona = make_glow("vs_corona", "fs_corona");
+        let skid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skid marks"),
+            size: (skids::VERTICES * std::mem::size_of::<sa_scene::Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let white_view = device
+            .create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("white"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                Default::default(),
+                &[255; 4],
+            )
+            .create_view(&Default::default());
         let headlights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("headlights"),
             size: (HEADLIGHT_VERTICES * std::mem::size_of::<sa_scene::Vertex>()) as u64,
@@ -543,6 +574,20 @@ impl State {
                 1
             },
             ..Default::default()
+        });
+        let white = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("white"),
+            layout: &image_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
         });
         let animation = scene.animation.take();
         let collision = scene.collision.take();
@@ -630,6 +675,9 @@ impl State {
             corona,
             light_pool,
             headlights,
+            skids: skids::Skids::default(),
+            skid_buffer,
+            white,
             shadows,
             daycycle: daycycle::DayCycle::default(),
             zones: zones::Zones::default(),
@@ -1141,14 +1189,19 @@ impl State {
                     self.keys.contains(&KeyCode::KeyD),
                     self.gamepad.move_x,
                 );
+                let handbrake = self.keys.contains(&KeyCode::Space) || self.gamepad.handbrake;
                 car.step(
                     world,
                     throttle,
                     steer,
-                    self.keys.contains(&KeyCode::Space) || self.gamepad.handbrake,
+                    handbrake,
                     self.menu.settings.vehicle_handling,
                     dt,
                 );
+                if dt > 0.0 {
+                    self.skids
+                        .update(car, skids::intensity(car, throttle, handbrake));
+                }
                 let center = [ORIGIN[0] + car.position.x, ORIGIN[1] - car.position.z];
                 if streaming::distance(center, self.region) > RADIUS - 60.0 {
                     car.position = previous;
@@ -2013,6 +2066,19 @@ impl State {
                 pass.set_bind_group(1, &b.texture, &[]);
                 pass.set_vertex_buffer(0, b.buffer.slice(..));
                 pass.draw(0..b.count, 0..1);
+            }
+            if self.interior == 0 {
+                if std::mem::take(&mut self.skids.dirty) {
+                    self.queue.write_buffer(
+                        &self.skid_buffer,
+                        0,
+                        bytemuck::cast_slice(&self.skids.vertices),
+                    );
+                }
+                pass.set_pipeline(&self.blended);
+                pass.set_bind_group(1, &self.white, &[]);
+                pass.set_vertex_buffer(0, self.skid_buffer.slice(..));
+                pass.draw(0..skids::VERTICES as u32, 0..1);
             }
         }
         if self.lighting.daylight < 1.0 || self.interior != 0 {
