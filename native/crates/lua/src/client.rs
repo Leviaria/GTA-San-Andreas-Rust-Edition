@@ -214,7 +214,10 @@ impl Host {
                     .resources
                     .get(&resource)
                     .is_some_and(|r| r.sha256 == sha);
-                if valid_resource_name(&resource) && valid_sha && !running {
+                // A repeated announcement (a start broadcast racing the
+                // join announcement) must not download the bundle twice.
+                let requested = self.wanted.get(&sha) == Some(&resource);
+                if valid_resource_name(&resource) && valid_sha && !running && !requested {
                     self.wanted.retain(|_, r| r != &resource);
                     self.wanted.insert(sha.clone(), resource);
                     self.requests.push(sha);
