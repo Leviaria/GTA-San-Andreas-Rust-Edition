@@ -48,6 +48,7 @@ pub struct Settings {
     pub saturation: f32,
     pub vignette: f32,
     pub atmospheric_fog: bool,
+    pub sun_lighting: f32,
     pub fsr1: bool,
     pub renderer: Renderer,
     pub fps_limit: u32,
@@ -79,6 +80,7 @@ impl Default for Settings {
             saturation: 1.05,
             vignette: 0.12,
             atmospheric_fog: true,
+            sun_lighting: 0.35,
             fsr1: true,
             renderer: Renderer::Auto,
             fps_limit: 0,
@@ -105,6 +107,7 @@ impl Settings {
             (&mut self.exposure, defaults.exposure, 0.5, 1.8),
             (&mut self.saturation, defaults.saturation, 0.0, 1.5),
             (&mut self.vignette, defaults.vignette, 0.0, 0.5),
+            (&mut self.sun_lighting, defaults.sun_lighting, 0.0, 1.0),
             (&mut self.master_volume, defaults.master_volume, 0.0, 1.0),
             (&mut self.music_volume, defaults.music_volume, 0.0, 1.0),
             (&mut self.effects_volume, defaults.effects_volume, 0.0, 1.0),
@@ -173,6 +176,7 @@ impl Settings {
         self.saturation = 1.05;
         self.vignette = 0.12;
         self.atmospheric_fog = true;
+        self.sun_lighting = 0.35;
         self.texture_anisotropy = [1, 4, 8, 16][index.min(3)];
     }
     pub fn preset(&self) -> &'static str {

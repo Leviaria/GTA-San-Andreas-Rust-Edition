@@ -1311,7 +1311,11 @@ impl State {
                 } else {
                     0.0
                 },
-                0.0,
+                if self.interior == 0 {
+                    self.menu.settings.sun_lighting
+                } else {
+                    0.0
+                },
                 0.0,
                 0.0,
             ]),
@@ -4123,4 +4127,24 @@ fn main() -> Result<()> {
         anyhow::bail!(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod shader_tests {
+    #[test]
+    fn scene_shaders_validate() {
+        for (name, source) in [
+            ("shader.wgsl", include_str!("shader.wgsl")),
+            ("postprocess.wgsl", include_str!("postprocess.wgsl")),
+        ] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
+    }
 }

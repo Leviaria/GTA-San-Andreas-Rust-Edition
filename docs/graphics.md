@@ -18,6 +18,11 @@ live and persist, except renderer and texture-filter changes which require resta
 - FSR filtering happens after scene anti-aliasing and tone mapping, in sRGB
   space. EASU operates when upscaling; at native resolution or supersampling,
   linear scaling is followed by RCAS. A Linear option bypasses FSR.
+- Sun lighting (0–100%, default 35%): outdoor surfaces are shaded by how they
+  face a fixed sun direction, with a sky/ground ambient tint, multiplied on top
+  of the original prelit vertex colors. Face normals come from screen-space
+  derivatives, so moving cars and peds are lit without extra vertex data.
+  Interiors are unaffected and 0% restores the original look.
 - FXAA, adjustable sharpening, a small bright-pass bloom filter, exposure,
   saturation, vignette and outdoor distance haze. Fog is disabled indoors.
 - A linear RGBA16F intermediate scene target and filmic display mapping.

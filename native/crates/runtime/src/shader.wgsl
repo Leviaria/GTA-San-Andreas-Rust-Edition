@@ -22,15 +22,31 @@ struct VertexOut {
     out.world_position = input.position;
     return out;
 }
+// environment.x: outdoor haze, environment.y: sun lighting strength (0 keeps the
+// original prelit look). The face normal comes from screen-space derivatives,
+// so moving cars and animated peds need no extra vertex data.
+const SUN: vec3<f32> = vec3<f32>(-0.42, 0.80, 0.43);
+fn sun_light(world_position: vec3<f32>) -> vec3<f32> {
+    var normal = normalize(cross(dpdx(world_position), dpdy(world_position)));
+    if (dot(normal, camera.eye.xyz - world_position) < 0.0) { normal = -normal; }
+    let facing = max(dot(normal, normalize(SUN)), 0.0);
+    let sky = mix(vec3<f32>(0.62, 0.60, 0.58), vec3<f32>(0.72, 0.76, 0.84), normal.y * 0.5 + 0.5);
+    let lit = sky + vec3<f32>(1.0, 0.95, 0.86) * 0.45 * facing;
+    return mix(vec3<f32>(1.0), lit, camera.environment.y);
+}
+fn shade(color: vec4<f32>, input: VertexOut, light: vec3<f32>) -> vec4<f32> {
+    let haze = (1.0 - exp(-distance(input.world_position, camera.eye.xyz) * 0.00045)) * camera.environment.x;
+    return vec4<f32>(mix(color.rgb * light, vec3<f32>(0.48, 0.60, 0.70), haze), color.a);
+}
 @fragment fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+    let light = sun_light(input.world_position);
     let color = textureSample(image, image_sampler, input.uv) * input.color;
     if (color.a < 0.5) { discard; }
-    let haze = (1.0 - exp(-distance(input.world_position, camera.eye.xyz) * 0.00045)) * camera.environment.x;
-    return vec4<f32>(mix(color.rgb, vec3<f32>(0.48, 0.60, 0.70), haze), color.a);
+    return shade(color, input, light);
 }
 @fragment fn fs_blended(input: VertexOut) -> @location(0) vec4<f32> {
+    let light = sun_light(input.world_position);
     let color = textureSample(image, image_sampler, input.uv) * input.color;
     if (color.a < 0.04) { discard; }
-    let haze = (1.0 - exp(-distance(input.world_position, camera.eye.xyz) * 0.00045)) * camera.environment.x;
-    return vec4<f32>(mix(color.rgb, vec3<f32>(0.48, 0.60, 0.70), haze), color.a);
+    return shade(color, input, light);
 }

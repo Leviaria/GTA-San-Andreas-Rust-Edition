@@ -3350,6 +3350,7 @@ dependencies = [
  "egui-winit",
  "gilrs",
  "glam 0.30.10",
+ "naga",
  "png",
  "pollster 0.4.0",
  "sa-assets",
