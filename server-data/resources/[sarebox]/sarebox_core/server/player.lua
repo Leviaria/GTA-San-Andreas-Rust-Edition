@@ -163,30 +163,93 @@ function Core.Functions.Notify(src, text, kind, title)
   TriggerClientEvent('sare:ui:notify', src, { title = title or 'SARE Box', description = text, type = kind or 'inform' })
 end
 
+local function licenseKey(license) return ('license:%s'):format(license) end
+
+local function loadSaved(src, citizenid)
+  local saved = citizenid and GetResourceKvpString(kvpKey(citizenid))
+  local ok, data = pcall(json.decode, saved or 'null')
+  if not ok or type(data) ~= 'table' then return nil end
+  data.name = GetPlayerName(src)
+  data.job = jobData(data.job and data.job.name, data.job and data.job.grade and data.job.grade.level)
+    or jobData('unemployed', 0)
+  data.metadata = type(data.metadata) == 'table' and data.metadata or {}
+  data.money = type(data.money) == 'table' and data.money or {}
+  for name, start in pairs(Config.StartMoney) do
+    if type(data.money[name]) ~= 'number' then data.money[name] = start end
+  end
+  return data
+end
+
+-- Characters from before signed identities are saved under the old,
+-- unsigned license. A game reports that old license as its `legacy:`
+-- identifier, but anyone who has seen a license (in server.cfg, the console
+-- or /id) could report it too, so it is only a claim. `sarebox_migration`:
+--   admin (default): an admin approves each claim with /sarebox_migrate.
+--   auto: the first signed player to claim an old character gets it.
+--   off:  old characters are not offered.
+Core.Pending = {}
+local function migrationMode()
+  local mode = GetConvar('sarebox_migration', 'admin')
+  if mode == 'auto' or mode == 'off' then return mode end
+  return 'admin'
+end
+local function legacyClaim(src)
+  local legacy = GetPlayerIdentifierByType(src, 'legacy')
+  legacy = legacy and legacy:gsub('^legacy:', '')
+  local citizenid = legacy and GetResourceKvpString(licenseKey(legacy))
+  if citizenid and GetResourceKvpString(kvpKey(citizenid)) then return legacy, citizenid end
+end
+-- Move an old character to the player's signed license. The old license is
+-- removed, so the same character cannot be claimed again.
+function Core.Functions.MigrateCharacter(license, legacy, citizenid)
+  if GetResourceKvpString(licenseKey(legacy)) ~= citizenid then return false end
+  if GetResourceKvpString(licenseKey(license)) then return false end
+  SetResourceKvp(licenseKey(license), citizenid)
+  DeleteResourceKvp(licenseKey(legacy))
+  print(('[sarebox] Character %s moved from old license %s to %s'):format(citizenid, legacy, license))
+  return true
+end
+
+function Core.Functions.NewCharacter(src, license)
+  local citizenid = newCitizenId()
+  local data = defaults(src, license, citizenid)
+  SetResourceKvp(kvpKey(citizenid), json.encode(data))
+  SetResourceKvp(licenseKey(license), citizenid)
+  return data
+end
+
 -- Load the character saved for this license, or create one. Players without
 -- a license (an old game build) get a character that is not saved.
 function Core.Functions.Login(src)
   -- Repeated joins or a restart racing a join keep the loaded character.
   if Players[src] then return Players[src] end
   local license = GetPlayerIdentifierByType(src, 'license')
+  license = license and license:gsub('^license:', '')
   local data
   if license then
-    local citizenid = GetResourceKvpString(('license:%s'):format(license))
-    local saved = citizenid and GetResourceKvpString(kvpKey(citizenid))
-    data = saved and json.decode(saved)
-    if data then
-      data.name = GetPlayerName(src)
-      data.job = jobData(data.job and data.job.name, data.job and data.job.grade and data.job.grade.level)
-        or jobData('unemployed', 0)
-      data.metadata = type(data.metadata) == 'table' and data.metadata or {}
-      data.money = type(data.money) == 'table' and data.money or {}
-      for name, start in pairs(Config.StartMoney) do
-        if type(data.money[name]) ~= 'number' then data.money[name] = start end
+    local citizenid = GetResourceKvpString(licenseKey(license))
+    data = loadSaved(src, citizenid)
+    if not data and not citizenid then
+      local legacy, old = legacyClaim(src)
+      local mode = migrationMode()
+      if legacy and mode == 'auto' and Core.Functions.MigrateCharacter(license, legacy, old) then
+        citizenid = old
+        data = loadSaved(src, citizenid)
+      elseif legacy and mode == 'admin' then
+        -- Play as an unsaved guest until an admin decides.
+        Core.Pending[src] = { license = license, legacy = legacy, citizenid = old }
+        local ok, saved = pcall(json.decode, GetResourceKvpString(kvpKey(old)))
+        local oldName = ok and type(saved) == 'table' and saved.name or '?'
+        print(('[sarebox] %s (%d) claims the old character %s (last saved as %s). Check that it is really them, then: sarebox_migrate %d (or sarebox_migrate %d reject)')
+          :format(GetPlayerName(src), src, old, oldName, src, src))
+        data = defaults(src, nil, 'GUEST' .. src)
+        data.pendingMigration = old
       end
-    else
-      citizenid = newCitizenId()
-      SetResourceKvp(('license:%s'):format(license), citizenid)
-      data = defaults(src, license, citizenid)
+    end
+    if data and not data.pendingMigration then
+      data.license = license
+    elseif not data then
+      data = Core.Functions.NewCharacter(src, license)
     end
   else
     data = defaults(src, nil, 'GUEST' .. src)
@@ -198,6 +261,7 @@ function Core.Functions.Login(src)
 end
 
 function Core.Functions.Logout(src)
+  Core.Pending[src] = nil
   local player = Players[src]
   if not player then return end
   player.Functions.Save()
