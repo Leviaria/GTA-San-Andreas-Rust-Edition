@@ -105,7 +105,13 @@ impl Sarebox {
                 })
             })
             .collect();
-        pump(&self.shared, &mut self.console, &self.session, &mut self.known).unwrap();
+        pump(
+            &self.shared,
+            &mut self.console,
+            &self.session,
+            &mut self.known,
+        )
+        .unwrap();
         for player in players.iter_mut() {
             for event in player.client.events() {
                 player.host.handle_event(&event.name, &event.payload);
@@ -224,18 +230,39 @@ fn money_is_validated_saved_atomically_and_survives_restarts_and_reconnects() {
         std::fs::read_to_string(&file).is_ok_and(|t| t.contains("\\\"cash\\\":525"))
     });
 
-    // Restarting the core twice keeps the character and one HUD, and the
-    // admin resource that depends on it keeps working.
+    // Restarting the core twice keeps the character and one HUD, closes the
+    // menu it had open, and the admin resource that depends on it is
+    // restarted with it and keeps working.
+    player.command("/playermenu");
+    assert!(player.host.ui().context.is_some());
     for _ in 0..2 {
         server.run("restart sarebox_core");
     }
     assert!(server.shared.borrow().resources["sarebox_admin"].started);
+    // Times out if the old menu stays open.
+    server.until(&mut [&mut player], "restarted UI", |_, p| {
+        let ui = p[0].host.ui();
+        p[0].host.resources().len() == 2 && ui.text.is_some() && ui.context.is_none()
+    });
     player.command(&format!("/givemoney {id} cash 5"));
     server.until(&mut [&mut player], "money after restarts", |_, p| {
         cash(p[0]) == "$530"
     });
     server.idle(&mut [&mut player], 40);
     assert_eq!(cash(&player), "$530");
+    assert!(
+        !player.text().contains("\n\n"),
+        "one HUD: {}",
+        player.text()
+    );
+    let paid = player
+        .host
+        .ui()
+        .notifications
+        .iter()
+        .filter(|n| n.description == "+$5")
+        .count();
+    assert_eq!(paid, 1, "one handler per event after restarts");
     let output = server.output();
     assert!(!output.contains("SCRIPT ERROR"), "{output}");
 
@@ -274,7 +301,9 @@ fn old_characters_move_to_signed_licenses_only_with_admin_approval() {
     let id = server.id(&player);
     // Not loaded yet: a guest, and the console names the claim.
     assert_eq!(cash(&player), "$500");
-    assert!(server.output().contains("claims the old character OLDCHAR1"));
+    assert!(server
+        .output()
+        .contains("claims the old character OLDCHAR1"));
     // The old license grants nothing, even if an admin config still names it.
     server.run(&format!(
         "add_principal identifier.legacy:{legacy} group.admin"

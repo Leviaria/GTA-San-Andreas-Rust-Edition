@@ -118,10 +118,44 @@ pub struct Ui {
     pub context: Option<Context>,
     pub dialog: Option<Dialog>,
     pub progress: Option<Progress>,
-    /// Text shown at the side of the screen, like ox_lib's text UI.
+    /// Text shown at the side of the screen, like ox_lib's text UI: every
+    /// owner's text, one block each, in the order they were first shown.
     pub text: Option<String>,
+    texts: Vec<(Owner, String)>,
 }
 impl Ui {
+    /// Show (`Some`) or hide (`None`) one owner's text UI. Owners never
+    /// replace each other's text, so a job's instructions and a HUD coexist.
+    pub fn set_text(&mut self, owner: Owner, value: Option<String>) {
+        match (self.texts.iter().position(|(o, _)| *o == owner), value) {
+            (Some(i), Some(value)) => self.texts[i].1 = value,
+            (None, Some(value)) => self.texts.push((owner, value)),
+            (Some(i), None) => {
+                self.texts.remove(i);
+            }
+            (None, None) => {}
+        }
+        self.text = (!self.texts.is_empty()).then(|| {
+            self.texts
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        });
+    }
+    /// Remove everything a stopped resource showed.
+    pub fn clear_owner(&mut self, owner: &Owner) {
+        self.set_text(owner.clone(), None);
+        if self.context.as_ref().is_some_and(|c| c.owner == *owner) {
+            self.context = None;
+        }
+        if self.dialog.as_ref().is_some_and(|d| d.owner == *owner) {
+            self.dialog = None;
+        }
+        if self.progress.as_ref().is_some_and(|p| p.owner == *owner) {
+            self.progress = None;
+        }
+    }
     /// Whether the player needs the mouse for this UI.
     pub fn wants_cursor(&self) -> bool {
         self.context.is_some() || self.dialog.is_some()

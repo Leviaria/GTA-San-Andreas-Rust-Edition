@@ -359,9 +359,11 @@ fn start_depth(shared: &Shared, name: &str, depth: usize) -> Result<()> {
         if dependency.starts_with('/') {
             continue;
         }
-        let target = resolve(shared, dependency).unwrap_or_else(|| dependency.to_string());
+        let Some(target) = resolve(shared, dependency) else {
+            bail!("{name} needs the resource {dependency}, which is not in resources/ (no resource is named or provides it).");
+        };
         start_depth(shared, &target, depth + 1)
-            .with_context(|| format!("{name} depends on {dependency}"))?;
+            .with_context(|| format!("{name} depends on {dependency}, which could not start"))?;
     }
     let scripts: Vec<String> = manifest
         .values("shared_script")
@@ -382,6 +384,7 @@ fn start_depth(shared: &Shared, name: &str, depth: usize) -> Result<()> {
         resource.started = true;
         resource.lua = lua.clone();
     }
+    let mut failed = 0;
     if let Some(lua) = &lua {
         for pattern in scripts {
             let (owner, folder, pattern) = script_source(shared, name, &path, &pattern)?;
@@ -394,6 +397,7 @@ fn start_depth(shared: &Shared, name: &str, depth: usize) -> Result<()> {
                 let source = sa_lua::cfxlua::translate(&source).unwrap_or(source);
                 if let Err(error) = lua.load(&source).set_name(chunk_name).exec() {
                     report_error(shared, name, error);
+                    failed += 1;
                 }
             }
         }
@@ -406,25 +410,102 @@ fn start_depth(shared: &Shared, name: &str, depth: usize) -> Result<()> {
             );
         }
     }
-    out(shared, format!("Started resource {name}"));
+    if failed > 0 {
+        out(
+            shared,
+            format!("Started resource {name}, but {failed} script file(s) failed to load (errors above); it may not work."),
+        );
+    } else {
+        out(shared, format!("Started resource {name}"));
+    }
     let args = [Json::String(name.into())];
     dispatch(shared, "onResourceStart", 0, &args, false);
     dispatch(shared, "onServerResourceStart", 0, &args, false);
     Ok(())
 }
 
-pub fn stop(shared: &Shared, name: &str) -> Result<()> {
-    {
+/// Started resources whose `dependency` names `name` or something it
+/// `provide`s.
+fn dependents(shared: &Shared, name: &str) -> Vec<String> {
+    let started: Vec<(String, Vec<String>)> = {
         let state = shared.borrow();
-        let Some(resource) = state.resources.get(name) else {
-            bail!("Couldn't find resource {name}.");
-        };
-        if !resource.started {
-            return Ok(());
+        state
+            .resources
+            .iter()
+            .filter(|(other, r)| r.started && other.as_str() != name)
+            .map(|(other, r)| {
+                let wants = r.manifest.values("dependency").map(str::to_string);
+                (other.clone(), wants.collect())
+            })
+            .collect()
+    };
+    let provides = shared
+        .borrow()
+        .resources
+        .get(name)
+        .map(|r| r.provides.clone())
+        .unwrap_or_default();
+    started
+        .into_iter()
+        .filter(|(_, wants)| {
+            wants.iter().any(|d| {
+                d == name || provides.contains(d) || resolve(shared, d).as_deref() == Some(name)
+            })
+        })
+        .map(|(other, _)| other)
+        .collect()
+}
+
+/// Stop `name` and, first, every started resource that depends on it, as
+/// FiveM does: a dependent left running would keep stale exports and
+/// function references. Returns the dependents in the order they stopped.
+pub fn stop_tree(shared: &Shared, name: &str) -> Result<Vec<String>> {
+    fn collect(shared: &Shared, name: &str, order: &mut Vec<String>, depth: usize) {
+        if depth > 16 {
+            return;
         }
-        if resource.manifest.native_assets && state.assets_locked {
-            bail!("{name} has native assets that clients loaded at join; remove it from server.cfg and restart the server.");
+        for dependent in dependents(shared, name) {
+            if !order.contains(&dependent) {
+                collect(shared, &dependent, order, depth + 1);
+                if !order.contains(&dependent) {
+                    order.push(dependent);
+                }
+            }
         }
+    }
+    let mut order = Vec::new();
+    collect(shared, name, &mut order, 0);
+    for other in order.iter().chain(std::iter::once(&name.to_string())) {
+        check_stoppable(shared, other)?;
+    }
+    for dependent in &order {
+        out(
+            shared,
+            format!("{dependent} depends on {name}; stopping it too."),
+        );
+        stop_one(shared, dependent)?;
+    }
+    stop_one(shared, name)?;
+    Ok(order)
+}
+fn check_stoppable(shared: &Shared, name: &str) -> Result<()> {
+    let state = shared.borrow();
+    let Some(resource) = state.resources.get(name) else {
+        bail!("Couldn't find resource {name}.");
+    };
+    if resource.started && resource.manifest.native_assets && state.assets_locked {
+        bail!("{name} has native assets that clients loaded at join; remove it from server.cfg and restart the server.");
+    }
+    Ok(())
+}
+
+pub fn stop(shared: &Shared, name: &str) -> Result<()> {
+    stop_tree(shared, name).map(|_| ())
+}
+fn stop_one(shared: &Shared, name: &str) -> Result<()> {
+    check_stoppable(shared, name)?;
+    if !shared.borrow().resources[name].started {
+        return Ok(());
     }
     let args = [Json::String(name.into())];
     dispatch(shared, "onResourceStop", 0, &args, false);
