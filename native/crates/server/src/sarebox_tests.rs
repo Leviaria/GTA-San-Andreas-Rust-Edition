@@ -14,6 +14,8 @@ pub struct Player {
 }
 impl Player {
     /// San Andreas world coordinates, as `GetEntityCoords` reports them.
+    /// Moves the player now; see `Sarebox::settle` to wait until the server
+    /// has seen it.
     pub fn place(&mut self, [x, y, z]: [f32; 3], driving: bool) {
         self.pose.position = [x - 2500.0, z, -1670.0 - y];
         self.pose.driving = driving;
@@ -156,6 +158,16 @@ impl Sarebox {
             );
         }
     }
+    /// Wait until the server sees the player's current pose.
+    pub fn settle(&mut self, player: &mut Player) {
+        let id = self.id(player);
+        let pose = player.pose;
+        self.until(&mut [player], "the server to see the pose", |s, _| {
+            s.shared.borrow().peers.iter().any(|p| {
+                p.id == id && p.pose.position == pose.position && p.pose.driving == pose.driving
+            })
+        });
+    }
     /// Run frames for a while, for checks that something does not happen.
     pub fn idle(&mut self, players: &mut [&mut Player], frames: usize) {
         for _ in 0..frames {
@@ -242,7 +254,9 @@ fn money_is_validated_saved_atomically_and_survives_restarts_and_reconnects() {
     // Times out if the old menu stays open.
     server.until(&mut [&mut player], "restarted UI", |_, p| {
         let ui = p[0].host.ui();
-        p[0].host.resources().len() == 2 && ui.text.is_some() && ui.context.is_none()
+        p[0].host.resources().iter().any(|r| r == "sarebox_core")
+            && ui.text.is_some()
+            && ui.context.is_none()
     });
     player.command(&format!("/givemoney {id} cash 5"));
     server.until(&mut [&mut player], "money after restarts", |_, p| {
@@ -442,6 +456,7 @@ fn drive(server: &mut Sarebox, player: &mut Player, to: [f32; 3], speed: f32) {
         server.step(&mut [player]);
         assert!(start.elapsed() < Duration::from_secs(20), "drive timed out");
     }
+    server.settle(player);
 }
 
 #[test]
@@ -450,6 +465,7 @@ fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
     assert!(server.shared.borrow().resources["sarebox_taxi"].started);
     let mut player = server.join();
     player.place(START, true);
+    server.settle(&mut player);
 
     // Only taxi drivers get runs; signing up is checked on the server.
     taxi_menu(&mut server, &mut player, "Take a dispatch");
@@ -462,6 +478,7 @@ fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
     });
     // Not in a car: no run.
     player.place(START, false);
+    server.settle(&mut player);
     taxi_menu(&mut server, &mut player, "Take a dispatch");
     server.until(&mut [&mut player], "the car check", |_, p| {
         notified(p[0], "Get in a car first")
@@ -469,6 +486,7 @@ fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
 
     // A run: the server names the point and the fare (40 + 370 * 0.12).
     player.place(START, true);
+    server.settle(&mut player);
     taxi_menu(&mut server, &mut player, "Take a dispatch");
     server.until(&mut [&mut player], "the route", |_, p| {
         p[0].text().contains("Taxi: drive to North Point")
@@ -497,7 +515,7 @@ fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
     // Driving there in time is paid once, and the menu no longer offers a
     // cancel for a finished run.
     player.place(START, true);
-    server.idle(&mut [&mut player], 120); // the server sees the car back
+    server.settle(&mut player);
     taxi_menu(&mut server, &mut player, "Take a dispatch");
     server.until(&mut [&mut player], "the route", |_, p| {
         p[0].text().contains("Taxi: drive to")
@@ -527,7 +545,7 @@ fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
 
     // Going off duty cancels the run.
     player.place(START, true);
-    server.idle(&mut [&mut player], 120);
+    server.settle(&mut player);
     taxi_menu(&mut server, &mut player, "Take a dispatch");
     server.until(&mut [&mut player], "the route", |_, p| {
         p[0].text().contains("Taxi: drive to")
