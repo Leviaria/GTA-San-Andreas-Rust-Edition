@@ -51,8 +51,19 @@ RegisterCommand('sarebox_migrate', function(src, args)
   end
   local target = tonumber(args[1])
   local claim = target and Core.Pending[target]
+  local replace = false
+  if not claim and target and args[2] ~= 'reject' then
+    -- A player who already got a new character (for example while the
+    -- server ran new binaries with old SARE Box files) can still get the
+    -- old one back; the new one is unlinked, not deleted.
+    local license = GetPlayerIdentifierByType(target, 'license')
+    local old, citizenid = Core.Functions.LegacyClaim(target)
+    if license and old then
+      claim, replace = { license = license, legacy = old, citizenid = citizenid }, true
+    end
+  end
   if not claim then
-    say('Usage: sarebox_migrate <server id> [reject]. That player has no pending claim.')
+    say('Usage: sarebox_migrate <server id> [reject]. That player claims no old character.')
     return
   end
   print(('[admin] %s: sarebox_migrate %d %s (character %s)'):format(src == 0 and 'console' or GetPlayerName(src) .. ' (' .. src .. ')',
@@ -62,7 +73,7 @@ RegisterCommand('sarebox_migrate', function(src, args)
     Core.Functions.NewCharacter(target, claim.license)
     Core.Functions.Notify(target, 'An admin did not confirm the old character. You start a new one.', 'warning')
     say(('Rejected; %s gets a new character.'):format(GetPlayerName(target)))
-  elseif Core.Functions.MigrateCharacter(claim.license, claim.legacy, claim.citizenid) then
+  elseif Core.Functions.MigrateCharacter(claim.license, claim.legacy, claim.citizenid, replace) then
     Core.Functions.Notify(target, 'Your old character is back.', 'success')
     say(('Moved character %s to %s.'):format(claim.citizenid, GetPlayerName(target)))
   else

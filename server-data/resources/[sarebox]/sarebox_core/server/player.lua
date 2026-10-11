@@ -193,20 +193,25 @@ local function migrationMode()
   if mode == 'auto' or mode == 'off' then return mode end
   return 'admin'
 end
-local function legacyClaim(src)
+-- Licenses are stored as full identifiers (`license:<hex>`), as before.
+-- A game's `legacy:<hex>` is the old `license:<hex>` it had here.
+function Core.Functions.LegacyClaim(src)
   local legacy = GetPlayerIdentifierByType(src, 'legacy')
-  legacy = legacy and legacy:gsub('^legacy:', '')
-  local citizenid = legacy and GetResourceKvpString(licenseKey(legacy))
-  if citizenid and GetResourceKvpString(kvpKey(citizenid)) then return legacy, citizenid end
+  local old = legacy and ('license:' .. legacy:gsub('^legacy:', ''))
+  local citizenid = old and GetResourceKvpString(licenseKey(old))
+  if citizenid and GetResourceKvpString(kvpKey(citizenid)) then return old, citizenid end
 end
 -- Move an old character to the player's signed license. The old license is
--- removed, so the same character cannot be claimed again.
-function Core.Functions.MigrateCharacter(license, legacy, citizenid)
-  if GetResourceKvpString(licenseKey(legacy)) ~= citizenid then return false end
-  if GetResourceKvpString(licenseKey(license)) then return false end
+-- removed, so the same character cannot be claimed again. With `replace`, a
+-- character the player already has here is unlinked (kept in KVP).
+function Core.Functions.MigrateCharacter(license, old, citizenid, replace)
+  if GetResourceKvpString(licenseKey(old)) ~= citizenid then return false end
+  local current = GetResourceKvpString(licenseKey(license))
+  if current and not replace then return false end
   SetResourceKvp(licenseKey(license), citizenid)
-  DeleteResourceKvp(licenseKey(legacy))
-  print(('[sarebox] Character %s moved from old license %s to %s'):format(citizenid, legacy, license))
+  DeleteResourceKvp(licenseKey(old))
+  print(('[sarebox] Character %s moved from %s to %s%s'):format(citizenid, old, license,
+    current and (' (unlinked character %s)'):format(current) or ''))
   return true
 end
 
@@ -224,13 +229,12 @@ function Core.Functions.Login(src)
   -- Repeated joins or a restart racing a join keep the loaded character.
   if Players[src] then return Players[src] end
   local license = GetPlayerIdentifierByType(src, 'license')
-  license = license and license:gsub('^license:', '')
   local data
   if license then
     local citizenid = GetResourceKvpString(licenseKey(license))
     data = loadSaved(src, citizenid)
     if not data and not citizenid then
-      local legacy, old = legacyClaim(src)
+      local legacy, old = Core.Functions.LegacyClaim(src)
       local mode = migrationMode()
       if legacy and mode == 'auto' and Core.Functions.MigrateCharacter(license, legacy, old) then
         citizenid = old

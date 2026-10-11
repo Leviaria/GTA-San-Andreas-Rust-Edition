@@ -287,9 +287,10 @@ fn old_characters_move_to_signed_licenses_only_with_admin_approval() {
     let mut server = Sarebox::boot(&[], |root| {
         std::fs::write(root.join("identity.salt"), salt).unwrap();
         let old = serde_json::json!({
-            format!("license:{legacy}"): "OLDCHAR1",
+            // Saves use full identifiers as keys: license:license:<hex>.
+            format!("license:license:{legacy}"): "OLDCHAR1",
             "player:OLDCHAR1": serde_json::json!({
-                "citizenid": "OLDCHAR1", "license": legacy, "name": "Old Me",
+                "citizenid": "OLDCHAR1", "license": format!("license:{legacy}"), "name": "Old Me",
                 "money": { "cash": 4242, "bank": 10 },
                 "job": { "name": "taxi", "grade": { "level": 1 } }, "metadata": {}
             }).to_string(),
@@ -327,8 +328,8 @@ fn old_characters_move_to_signed_licenses_only_with_admin_approval() {
     assert!(player.text().contains("Taxi - Driver"));
     let license = server.session.identity(id).unwrap();
     let saved = server.kvp();
-    assert_eq!(saved[format!("license:{license}")], "OLDCHAR1");
-    assert!(saved.get(format!("license:{legacy}")).is_none());
+    assert_eq!(saved[format!("license:license:{license}")], "OLDCHAR1");
+    assert!(saved.get(format!("license:license:{legacy}")).is_none());
 
     // Next time it loads directly, and nobody can claim it again.
     server.leave(player);
@@ -344,7 +345,7 @@ fn rejected_or_disabled_migration_gives_a_new_character() {
     let prepare = |root: &Path| {
         std::fs::write(root.join("identity.salt"), salt).unwrap();
         let old = serde_json::json!({
-            format!("license:{legacy}"): "OLDCHAR1",
+            format!("license:license:{legacy}"): "OLDCHAR1",
             "player:OLDCHAR1": "{\"citizenid\":\"OLDCHAR1\",\"money\":{\"cash\":4242,\"bank\":1}}",
         });
         std::fs::create_dir_all(root.join("kvp")).unwrap();
@@ -356,11 +357,16 @@ fn rejected_or_disabled_migration_gives_a_new_character() {
     server.run(&format!("sarebox_migrate {id} reject"));
     server.until(&mut [&mut player], "a saved new character", |s, _| {
         let license = s.session.identity(id).unwrap();
-        s.kvp().get(format!("license:{license}")).is_some()
+        s.kvp().get(format!("license:license:{license}")).is_some()
     });
     assert_eq!(cash(&player), "$500");
-    // The old character stays untouched for a later decision.
-    assert_eq!(server.kvp()[format!("license:{legacy}")], "OLDCHAR1");
+    // The old character stays untouched for a later decision, and an admin
+    // can still give it back over the new one.
+    assert_eq!(server.kvp()[format!("license:license:{legacy}")], "OLDCHAR1");
+    server.run(&format!("sarebox_migrate {id}"));
+    server.until(&mut [&mut player], "the old character", |_, p| {
+        cash(p[0]) == "$4242"
+    });
     drop(player);
     drop(server);
 
