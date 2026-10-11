@@ -9,6 +9,7 @@ const GOLD: Color32 = Color32::from_rgb(223, 183, 120);
 const WHITE: Color32 = Color32::from_rgb(239, 233, 221);
 const MUTED: Color32 = Color32::from_rgb(162, 169, 162);
 mod gta;
+mod map;
 const RADAR_WORLD_MIN: f32 = -3000.0;
 const RADAR_WORLD_MAX: f32 = 3000.0;
 const RADAR_TILE_SIZE: f32 = (RADAR_WORLD_MAX - RADAR_WORLD_MIN) / 12.0;
@@ -17,6 +18,132 @@ const RADAR_TILE_SIZE: f32 = (RADAR_WORLD_MAX - RADAR_WORLD_MIN) / 12.0;
 pub struct RadarTile {
     pub index: usize,
     pub texture: egui::TextureId,
+}
+
+/// A script blip as the radar and map draw it (SA world x, y).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapBlip {
+    pub position: [f32; 2],
+    pub color: Color32,
+    pub label: Option<String>,
+    pub route: bool,
+    pub short_range: bool,
+}
+/// Script blips and the GPS line, set each frame before `Menu::draw`.
+#[derive(Default)]
+pub struct MapOverlay {
+    pub blips: Vec<MapBlip>,
+    /// From the player to the route blip; empty without one.
+    pub route: Vec<[f32; 2]>,
+    pub route_color: Color32,
+}
+/// FiveM blip colour indices (`SetBlipColour`); unknown ones are white.
+pub fn blip_color(index: i64) -> Color32 {
+    match index {
+        1 | 6 | 59 => Color32::from_rgb(224, 50, 50),
+        2 | 25 | 69 => Color32::from_rgb(114, 204, 114),
+        3 | 26 | 38 => Color32::from_rgb(93, 182, 229),
+        5 | 46 | 66 => Color32::from_rgb(240, 200, 80),
+        7 | 27 | 83 => Color32::from_rgb(171, 104, 220),
+        8 | 48 => Color32::from_rgb(240, 120, 190),
+        17 | 47 | 81 => Color32::from_rgb(240, 145, 60),
+        _ => Color32::from_rgb(240, 240, 240),
+    }
+}
+/// Radar view radius in metres: wider the faster the car goes.
+fn radar_range(car_speed: Option<f32>, zoom: f32) -> f32 {
+    let metres = match car_speed {
+        Some(speed) => 260.0 + speed.abs().min(45.0) * 9.0,
+        None => 180.0,
+    };
+    metres / zoom.max(0.1)
+}
+/// The parts of a polyline (screen points) inside `area`, cut into short
+/// pieces so a line leaving the map stops at its edge.
+fn clip_line(points: &[Pos2], area: Rect) -> Vec<[Pos2; 2]> {
+    let mut pieces = Vec::new();
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let steps = ((b - a).length() / 6.0).ceil().clamp(1.0, 400.0) as usize;
+        for step in 0..steps {
+            let from = a + (b - a) * (step as f32 / steps as f32);
+            let to = a + (b - a) * ((step + 1) as f32 / steps as f32);
+            if area.contains(from) && area.contains(to) {
+                pieces.push([from, to]);
+            }
+        }
+    }
+    pieces
+}
+/// `point`, pulled back towards `origin` until it is inside `area`.
+fn clamp_towards(origin: Pos2, point: Pos2, area: Rect) -> Pos2 {
+    let direction = point - origin;
+    let mut t: f32 = 1.0;
+    for (delta, low, high, from) in [
+        (direction.x, area.left(), area.right(), origin.x),
+        (direction.y, area.top(), area.bottom(), origin.y),
+    ] {
+        if delta > 0.0 && from + delta > high {
+            t = t.min((high - from) / delta);
+        } else if delta < 0.0 && from + delta < low {
+            t = t.min((low - from) / delta);
+        }
+    }
+    origin + direction * t.max(0.0)
+}
+/// The radar's size: a GTA V-style rectangle in the bottom-left corner.
+fn minimap_size(screen: Rect) -> Vec2 {
+    let height = (screen.height() * 0.2).clamp(130.0, 210.0);
+    Vec2::new(height * 1.5, height)
+}
+/// A GTA V-style line: a dark outline under the colour.
+fn route_line(painter: &egui::Painter, pieces: &[[Pos2; 2]], color: Color32, width: f32) {
+    for (width, color) in [
+        (width + 2.5, Color32::from_black_alpha(200)),
+        (width, color),
+    ] {
+        for piece in pieces {
+            painter.line_segment(*piece, egui::Stroke::new(width, color));
+        }
+    }
+}
+/// A blip: a coloured dot with a dark ring.
+fn blip_dot(painter: &egui::Painter, at: Pos2, size: f32, color: Color32) {
+    painter.circle_filled(at, size + 1.5, Color32::from_black_alpha(230));
+    painter.circle_filled(at, size, color);
+}
+/// The waypoint: a purple pin.
+pub const WAYPOINT: Color32 = Color32::from_rgb(164, 76, 242);
+fn waypoint_pin(painter: &egui::Painter, at: Pos2, size: f32) {
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            at + Vec2::new(0.0, size * 0.2),
+            at + Vec2::new(-size * 0.7, -size),
+            at + Vec2::new(size * 0.7, -size),
+        ],
+        WAYPOINT,
+        egui::Stroke::new(1.0, Color32::BLACK),
+    ));
+    blip_dot(
+        painter,
+        at + Vec2::new(0.0, -size * 1.15),
+        size * 0.75,
+        WAYPOINT,
+    );
+}
+/// The player's arrow pointing along `direction` (screen space, unit).
+fn player_arrow(painter: &egui::Painter, at: Pos2, direction: Vec2, size: f32) {
+    let side = Vec2::new(-direction.y, direction.x);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            at + direction * size,
+            at - direction * size * 0.7 + side * size * 0.75,
+            at - direction * size * 0.35,
+            at - direction * size * 0.7 - side * size * 0.75,
+        ],
+        WHITE,
+        egui::Stroke::new(1.5, Color32::BLACK),
+    ));
 }
 
 fn radar_offset(dx: f32, dy: f32, yaw: f32, scale: f32) -> Vec2 {
@@ -212,6 +339,13 @@ pub struct Menu {
     settings_controls: Vec<(Rect, Rect)>,
     pub graphics_device: String,
     pub graphics_resolution: String,
+    pub overlay: MapOverlay,
+    /// Eased radar radius in metres.
+    radar_range: f32,
+    /// The player's map marker; the GPS follows it when no script route is set.
+    pub waypoint: Option<[f32; 2]>,
+    /// Pause map centre and pixels per metre; None re-centres on the player.
+    map_view: Option<([f32; 2], f32)>,
 }
 
 impl Menu {
@@ -531,6 +665,10 @@ impl Menu {
             settings_controls: Vec::new(),
             graphics_device: String::new(),
             graphics_resolution: String::new(),
+            overlay: MapOverlay::default(),
+            radar_range: 0.0,
+            waypoint: None,
+            map_view: None,
         }
     }
     pub fn submit_command(&mut self) {
@@ -543,6 +681,9 @@ impl Menu {
         }
     }
     pub fn open(&mut self, page: Page) {
+        if page == Page::Map {
+            self.map_view = None;
+        }
         self.page = Some(page);
         self.selected = 0;
         self.settings_scroll_to_selection = true;
@@ -698,6 +839,99 @@ impl Menu {
         );
         response.clicked()
     }
+    /// The radar: rotates with the camera, keeps the player low so more of
+    /// the road ahead shows, zooms out with speed, and shows blips (on the
+    /// edge when out of range), the waypoint and the GPS line.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_minimap(
+        &mut self,
+        ui: &mut egui::Ui,
+        size: Vec2,
+        coordinates: [f32; 3],
+        car_speed: Option<f32>,
+        yaw: f32,
+        radar_tiles: &[RadarTile],
+        dt: f32,
+    ) {
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let painter = ui.painter_at(rect);
+        let origin = Pos2::new(rect.center().x, rect.top() + rect.height() * 0.64);
+        let range = radar_range(car_speed, self.settings.minimap_zoom);
+        self.radar_range = if self.radar_range > 0.0 {
+            self.radar_range + (range - self.radar_range) * (1.0 - (-2.5 * dt).exp())
+        } else {
+            range
+        };
+        let map_scale = (origin.y - rect.top()) / self.radar_range;
+        let center = [coordinates[0], coordinates[1]];
+        let to_radar = |xy: [f32; 2]| {
+            origin + radar_offset(xy[0] - center[0], xy[1] - center[1], yaw, map_scale)
+        };
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(52, 76, 94));
+        // add_radar_tile draws around the rect centre; shift it to `origin`.
+        let shifted = rect.translate(origin - rect.center());
+        let clip = [
+            rect.left_top(),
+            rect.right_top(),
+            rect.right_bottom(),
+            rect.left_bottom(),
+        ];
+        for tile in radar_tiles {
+            add_radar_tile(&painter, *tile, shifted, center, yaw, map_scale, &clip);
+        }
+        let route: Vec<Pos2> = self.overlay.route.iter().map(|xy| to_radar(*xy)).collect();
+        route_line(
+            &painter,
+            &clip_line(&route, rect.shrink(1.0)),
+            self.overlay.route_color,
+            3.5,
+        );
+        let edge = rect.shrink(7.0);
+        let place = |point: Pos2| {
+            if edge.contains(point) {
+                (point, false)
+            } else {
+                (clamp_towards(origin, point, edge), true)
+            }
+        };
+        for blip in &self.overlay.blips {
+            let (at, outside) = place(to_radar(blip.position));
+            if outside && blip.short_range {
+                continue;
+            }
+            let size = if blip.route { 6.0 } else { 4.5 };
+            blip_dot(
+                &painter,
+                at,
+                if outside { size * 0.8 } else { size },
+                blip.color,
+            );
+        }
+        if let Some(waypoint) = self.waypoint {
+            let (at, _) = place(to_radar(waypoint));
+            waypoint_pin(&painter, at, 8.0);
+        }
+        let north = clamp_towards(
+            origin,
+            origin + radar_offset(0.0, 1.0, yaw, 2000.0),
+            rect.shrink(10.0),
+        );
+        painter.circle_filled(north, 8.0, Color32::from_black_alpha(200));
+        painter.text(
+            north,
+            egui::Align2::CENTER_CENTER,
+            "N",
+            FontId::proportional(11.0),
+            WHITE,
+        );
+        player_arrow(&painter, origin, Vec2::new(0.0, -1.0), 8.0);
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(2.0, Color32::from_black_alpha(220)),
+            egui::StrokeKind::Inside,
+        );
+    }
     pub fn draw(
         &mut self,
         ctx: &egui::Context,
@@ -739,7 +973,10 @@ impl Menu {
             }
             if self.settings.show_hud {
                 egui::Area::new("freeroam-hud".into())
-                    .fixed_pos(Pos2::new(28.0, screen.bottom() - 76.0))
+                    .fixed_pos(Pos2::new(
+                        28.0,
+                        screen.bottom() - 84.0 - if self.settings.show_minimap { minimap_size(screen).y } else { 0.0 },
+                    ))
                     .interactable(false)
                     .show(ctx, |ui| {
                         ui.label(
@@ -761,94 +998,25 @@ impl Menu {
             }
             if self.settings.show_hud && self.settings.show_minimap {
                 egui::Area::new("freeroam-minimap".into())
-                    .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-28.0, -28.0))
+                    .anchor(egui::Align2::LEFT_BOTTOM, Vec2::new(28.0, -28.0))
                     .interactable(false)
                     .show(ctx, |ui| {
-                        let side = (screen.height() * 0.22).clamp(150.0, 205.0);
-                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
-                        let painter = ui.painter();
-                        let radius = side * 0.49;
-                        let center = [coordinates[0], coordinates[1]];
-                        let map_scale = side / (2400.0 / self.settings.minimap_zoom);
-                        painter.rect_filled(rect, 0.0, Color32::from_black_alpha(230));
-                        let circle = (0..64)
-                            .map(|index| {
-                                let angle = index as f32 * std::f32::consts::TAU / 64.0;
-                                rect.center() + Vec2::angled(angle) * radius
-                            })
-                            .collect::<Vec<_>>();
-                        for tile in radar_tiles {
-                            add_radar_tile(painter, *tile, rect, center, yaw, map_scale, &circle);
-                        }
-                        painter.circle_stroke(rect.center(), radius, egui::Stroke::new(2.0, GOLD));
-                        let nearest = DESTINATIONS
-                            .iter()
-                            .min_by(|a, b| {
-                                let distance = |xy: [f32; 2]| {
-                                    (xy[0] - coordinates[0]).powi(2)
-                                        + (xy[1] - coordinates[1]).powi(2)
-                                };
-                                distance(a.1).total_cmp(&distance(b.1))
-                            })
-                            .map(|destination| destination.1)
-                            .unwrap_or([coordinates[0], coordinates[1]]);
-                        let map_scale = side / (2400.0 / self.settings.minimap_zoom);
-                        for (_, xy) in DESTINATIONS.iter() {
-                            let offset = radar_offset(
-                                xy[0] - coordinates[0],
-                                xy[1] - coordinates[1],
-                                yaw,
-                                map_scale,
-                            );
-                            if offset.length() < side * 0.43 {
-                                painter.circle_filled(rect.center() + offset, 3.0, MUTED);
-                            }
-                        }
-                        let marker = radar_offset(
-                            nearest[0] - coordinates[0],
-                            nearest[1] - coordinates[1],
+                        let dt = ui.input(|input| input.stable_dt).min(0.1);
+                        self.draw_minimap(
+                            ui,
+                            minimap_size(screen),
+                            coordinates,
+                            car_speed,
                             yaw,
-                            map_scale,
+                            radar_tiles,
+                            dt,
                         );
-                        if marker.length() < side * 0.40 {
-                            painter.circle_filled(rect.center() + marker, 5.0, GOLD);
-                        }
-                        painter.circle_stroke(
-                            rect.center(),
-                            7.0,
-                            egui::Stroke::new(2.0, Color32::BLACK),
-                        );
-                        painter.circle_filled(rect.center(), 5.5, WHITE);
-                        painter.text(
-                            rect.left_top() + Vec2::splat(12.0),
-                            egui::Align2::LEFT_TOP,
-                            "RADAR",
-                            FontId::proportional(12.0),
-                            MUTED,
-                        );
-                        let north = radar_offset(0.0, 1.0, yaw, side * 0.39);
-                        painter.text(
-                            rect.center() + north,
-                            egui::Align2::CENTER_CENTER,
-                            "N",
-                            FontId::proportional(12.0),
-                            WHITE,
-                        );
-                        painter.add(egui::Shape::convex_polygon(
-                            vec![
-                                rect.center() + Vec2::new(0.0, -9.0),
-                                rect.center() + Vec2::new(7.0, 6.0),
-                                rect.center() + Vec2::new(-7.0, 6.0),
-                            ],
-                            GOLD,
-                            egui::Stroke::new(1.0, Color32::BLACK),
-                        ));
                     });
             }
             if self.settings.show_hud && self.settings.show_speedometer {
                 if let Some(speed) = car_speed {
                     egui::Area::new("freeroam-speedometer".into())
-                        .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-250.0, -30.0))
+                        .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-28.0, -30.0))
                         .interactable(false)
                         .show(ctx, |ui| {
                             ui.label(
@@ -903,6 +1071,8 @@ impl Menu {
             }
             if let (Some(content), Page::Pause) = (gta_content, page) {
                 if let Some(chosen) = self.gta_pause(ui, content, scale, coordinates) { action = Some(chosen); }
+            } else if let (Some(content), Page::Map) = (gta_content, page) {
+                if let Some(chosen) = self.gta_map(ui, content, scale, coordinates, yaw, radar_tiles) { action = Some(chosen); }
             } else if matches!(page,Page::Main|Page::Pause) {
                 let labels=if page==Page::Main{[if self.has_checkpoint { "Continue free roam" } else { "Explore San Andreas" },"Map & destinations","Settings","Controls","Mods","Wardrobe","Interiors","Cars","Peds","Quit","Multiplayer"]}else{["Resume","Map & destinations","Settings","Controls","Mods","Wardrobe","Interiors","Cars","Peds","Main menu","Multiplayer"]};
                 if ctx.input(|i|i.key_pressed(egui::Key::ArrowDown)){self.selected=(self.selected+1)%labels.len();}
@@ -958,13 +1128,23 @@ impl Menu {
                                 for tile in radar_tiles { add_radar_tile(p,*tile,map,[0.0,0.0],0.0,map.width()/6000.0,&clip); }
                                 if radar_tiles.is_empty() { p.text(map.center(),egui::Align2::CENTER_CENTER,"Original map unavailable",FontId::proportional(14.0*scale),MUTED); }
                                 for (index,(_,xy)) in DESTINATIONS.iter().enumerate(){let point=project(*xy);p.circle_filled(point,8.0*scale,GOLD);p.text(point,egui::Align2::CENTER_CENTER,(index+1).to_string(),FontId::proportional(11.0*scale),Color32::BLACK);}
+                                let route:Vec<Pos2>=self.overlay.route.iter().map(|xy|project(*xy)).collect();
+                                if route.len()>=2 {
+                                    p.add(egui::Shape::line(route.clone(),egui::Stroke::new(5.0*scale,Color32::from_black_alpha(200))));
+                                    p.add(egui::Shape::line(route,egui::Stroke::new(3.0*scale,self.overlay.route_color)));
+                                }
+                                for blip in &self.overlay.blips {
+                                    let point=project(blip.position);
+                                    p.circle_filled(point,7.0*scale,Color32::BLACK);p.circle_filled(point,5.5*scale,blip.color);
+                                    if let Some(label)=&blip.label { p.text(point+Vec2::new(10.0*scale,0.0),egui::Align2::LEFT_CENTER,label,FontId::proportional(13.0*scale),WHITE); }
+                                }
                                 p.circle_stroke(project([coordinates[0],coordinates[1]]),12.0*scale,egui::Stroke::new(2.0,WHITE));
                                 columns[1].label(RichText::new("Overview map • white ring marks your position").size(13.0).color(MUTED));
                             });
                         },
                         Page::Controls=>{
                             egui::Grid::new("controls").spacing([80.0*scale,17.0*scale]).show(ui,|ui|{
-                                for (key,description) in [("Left stick","Move / steer"),("Right stick","Look around"),("A","Jump / select"),("X","Run"),("Y","Enter / exit car"),("RT / LT","Accelerate / brake / reverse"),("LB","Handbrake"),("Start / B","Pause / go back"),("Back","Open map"),("W A S D","Move / drive"),("Mouse","Look around"),("Shift","Run / fly faster"),("Space","Jump / handbrake in car"),("F6","Wardrobe"),("I","Interiors"),("F9","Spawn and enter a car"),("F","Enter / exit nearest car or leave passenger seat"),("G","Ride in another player's car"),("V","Toggle first / third person"),("P","Toggle walk / free-fly"),("Q / E","Fly down / up"),("1–9","Travel to map regions"),("R","Return to Grove Street"),("M","Open map"),("Esc","Pause / go back")]{ui.label(RichText::new(key).color(GOLD).strong());ui.label(description);ui.end_row();}
+                                for (key,description) in [("Left stick","Move / steer"),("Right stick","Look around"),("A","Jump / select"),("X","Run"),("Y","Enter / exit car"),("RT / LT","Accelerate / brake / reverse"),("LB","Handbrake"),("Start / B","Pause / go back"),("Back","Open map"),("W A S D","Move / drive"),("Mouse","Look around"),("Shift","Run / fly faster"),("Space","Jump / handbrake in car"),("F6","Wardrobe"),("I","Interiors"),("F9","Spawn and enter a car"),("F","Enter / exit nearest car or leave passenger seat"),("G","Ride in another player's car"),("V","Toggle first / third person"),("P","Toggle walk / free-fly"),("Q / E","Fly down / up"),("1–9","Travel to map regions"),("R","Return to Grove Street"),("M","Open map"),("Right-click map","Set / remove waypoint"),("Esc","Pause / go back")]{ui.label(RichText::new(key).color(GOLD).strong());ui.label(description);ui.end_row();}
                             });
                         },
                         Page::Interiors=>{
@@ -1506,5 +1686,108 @@ mod tests {
             frame(&ctx, &mut menu, &[egui::Key::Enter]),
             Some(Action::Clothing(1, false))
         );
+    }
+    fn frame_events(
+        ctx: &egui::Context,
+        menu: &mut Menu,
+        events: Vec<egui::Event>,
+    ) -> Option<Action> {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0))),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let mut action = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            action = menu.draw(
+                ui.ctx(),
+                [2500.0, -1670.0, 14.0],
+                false,
+                Some(20.0),
+                0.0,
+                &[],
+            );
+        });
+        output.textures_delta.clear();
+        action
+    }
+    #[test]
+    fn pause_map_places_and_removes_a_waypoint_and_travels() {
+        let ctx = egui::Context::default();
+        let mut menu = Menu::new(&ctx, Vec::new());
+        menu.has_played = true;
+        menu.open(Page::Map);
+        frame(&ctx, &mut menu, &[]);
+        let (center, zoom) = menu.map_view.unwrap();
+        assert_eq!(center, [2500.0, -1670.0]);
+        let click = Pos2::new(900.0, 500.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: click,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_events(&ctx, &mut menu, vec![egui::Event::PointerMoved(click)]);
+        frame_events(&ctx, &mut menu, vec![button(true)]);
+        frame_events(&ctx, &mut menu, vec![button(false)]);
+        let waypoint = menu.waypoint.expect("right-click places a waypoint");
+        assert!(waypoint[0].is_finite() && waypoint[1].is_finite());
+        // The same spot again removes it; Backspace removes it too.
+        frame_events(&ctx, &mut menu, vec![button(true)]);
+        frame_events(&ctx, &mut menu, vec![button(false)]);
+        assert_eq!(menu.waypoint, None);
+        menu.waypoint = Some([0.0, 0.0]);
+        frame(&ctx, &mut menu, &[egui::Key::Backspace]);
+        assert_eq!(menu.waypoint, None);
+        assert_eq!(
+            frame(&ctx, &mut menu, &[egui::Key::Num3]),
+            Some(Action::Teleport(2))
+        );
+        // PageUp zooms in around the centre.
+        frame(&ctx, &mut menu, &[egui::Key::PageUp]);
+        assert!(menu.map_view.unwrap().1 >= zoom);
+        // Back in the game: the radar draws blips, the waypoint and a route.
+        menu.waypoint = Some([2600.0, -1600.0]);
+        menu.overlay = MapOverlay {
+            blips: vec![MapBlip {
+                position: [5000.0, 0.0],
+                color: blip_color(5),
+                label: Some("Far away".into()),
+                route: true,
+                short_range: false,
+            }],
+            route: vec![[2500.0, -1670.0], [2600.0, -1670.0], [2600.0, -1600.0]],
+            route_color: WAYPOINT,
+        };
+        frame_events(&ctx, &mut menu, Vec::new());
+        menu.page = None;
+        frame_events(&ctx, &mut menu, Vec::new());
+        assert!(menu.radar_range > 260.0);
+    }
+    #[test]
+    fn radar_helpers_clip_lines_and_pull_blips_to_the_edge() {
+        let area = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 50.0));
+        let origin = Pos2::new(50.0, 30.0);
+        assert_eq!(
+            clamp_towards(origin, Pos2::new(250.0, 30.0), area),
+            Pos2::new(100.0, 30.0)
+        );
+        assert!(
+            clamp_towards(origin, Pos2::new(50.0, -70.0), area).distance(Pos2::new(50.0, 0.0))
+                < 1e-4
+        );
+        assert_eq!(
+            clamp_towards(origin, Pos2::new(60.0, 35.0), area),
+            Pos2::new(60.0, 35.0)
+        );
+        let pieces = clip_line(&[Pos2::new(10.0, 10.0), Pos2::new(300.0, 10.0)], area);
+        assert!(!pieces.is_empty());
+        assert!(pieces.iter().flatten().all(|p| area.contains(*p)));
+        assert!(radar_range(None, 1.0) < radar_range(Some(5.0), 1.0));
+        assert!(radar_range(Some(30.0), 1.0) < radar_range(Some(-45.0), 1.0));
+        assert_eq!(radar_range(Some(90.0), 2.0), radar_range(Some(45.0), 2.0));
+        assert_eq!(blip_color(5), blip_color(46));
+        assert_eq!(blip_color(999), blip_color(0));
     }
 }

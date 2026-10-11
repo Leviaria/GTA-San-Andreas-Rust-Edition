@@ -45,6 +45,34 @@ Natives: `PlayerId`, `PlayerPedId`, `GetPlayerServerId`, `GetPlayerFromServerId`
 Coordinates are San Andreas world coordinates. Only events registered with
 `RegisterNetEvent` can be triggered by the server.
 
+### Blips and GPS
+
+Blips are map markers on the radar and the pause map, as in FiveM:
+`AddBlipForCoord(x, y, z)`, `RemoveBlip`, `DoesBlipExist`, `SetBlipCoords`,
+`GetBlipCoords`, `SetBlipColour`, `SetBlipSprite`, `SetBlipRoute`,
+`SetBlipAsShortRange`, and a name with `BeginTextCommandSetBlipName('STRING')`,
+`AddTextComponentString(name)`, `EndTextCommandSetBlipName(blip)`.
+
+```lua
+local blip = AddBlipForCoord(2495.0, -1300.0, 13.0)
+SetBlipColour(blip, 5)      -- yellow
+SetBlipRoute(blip, true)    -- GPS line along the roads
+BeginTextCommandSetBlipName('STRING')
+AddTextComponentString('Pick-up')
+EndTextCommandSetBlipName(blip)
+```
+
+- A blip out of range sits on the edge of the radar, pointing the way, unless
+  it is short-range.
+- `SetBlipRoute` draws a GPS line in the blip's colour along the game's car
+  paths (`nodes*.dat` in your `gta3.img`), found again after a wrong turn.
+  The newest route blip wins over the player's own waypoint.
+- Colours are FiveM's indices; the common ones (white 0, red 1, green 2,
+  blue 3, yellow 5, purple 27, orange 47) have their own colour, others are
+  white. Sprites are stored but every blip is drawn as a dot for now.
+- A resource can change and remove only its own blips. Its blips disappear
+  when it stops, and all blips when the player leaves the server. At most 256.
+
 `RegisterKeyMapping('cmd', 'Label', 'keyboard', 'F2')` works for keys the game
 does not use itself: F1, F2, F11, F12, B, C, H, J, K, L, N, O, U, Y, Z, Tab,
 Home, End, Insert, Delete, Page Up and Page Down.

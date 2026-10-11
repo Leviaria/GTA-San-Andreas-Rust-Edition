@@ -11,6 +11,7 @@ mod client_scripts;
 mod controller;
 mod culling;
 mod gameplay_audio;
+mod gps;
 mod menu;
 mod metrics;
 mod mipmaps;
@@ -102,6 +103,9 @@ struct State {
     gui_renderer: egui_wgpu::Renderer,
     radar_tiles: Vec<menu::RadarTile>,
     _radar_textures: Vec<egui::TextureHandle>,
+    /// Car paths for the GPS line; None without the game's path files.
+    roads: Option<sa_scene::roads::RoadGraph>,
+    gps: gps::Gps,
     menu: menu::Menu,
     applied_settings: settings::Settings,
     persist_settings: bool,
@@ -554,6 +558,8 @@ impl State {
             gui_renderer,
             radar_tiles,
             _radar_textures: radar_texture_handles,
+            roads: None,
+            gps: gps::Gps::default(),
             menu,
             applied_settings,
             persist_settings: true,
@@ -1696,6 +1702,7 @@ impl State {
                         });
                     });
             }
+            self.update_map_overlay(coordinates);
             action = self.menu.draw(
                 ui.ctx(),
                 coordinates,
@@ -2118,6 +2125,13 @@ impl ApplicationHandler for App {
             }
         };
         let radar_tiles = radar_tiles.unwrap_or_default();
+        let roads = match sa_scene::roads::RoadGraph::load(&self.game_dir) {
+            Ok(roads) => Some(roads),
+            Err(error) => {
+                eprintln!("Car paths unavailable, GPS draws straight lines: {error:#}");
+                None
+            }
+        };
         match pollster::block_on(State::new(
             window.clone(),
             scene,
@@ -2125,6 +2139,7 @@ impl ApplicationHandler for App {
             radar_tiles,
         )) {
             Ok(mut state) => {
+                state.roads = roads;
                 state.persist_settings = !self.smoke;
                 if self.smoke_graphics {
                     state.menu.open_graphics();

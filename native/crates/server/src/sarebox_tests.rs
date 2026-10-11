@@ -496,6 +496,12 @@ fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
         "{}",
         player.text()
     );
+    // A yellow blip on the dispatch point, with the GPS route to it.
+    let blips = player.host.blips();
+    assert_eq!(blips.len(), 1);
+    assert_eq!(blips[0].label.as_deref(), Some("Taxi: North Point"));
+    assert!(blips[0].route && blips[0].colour == 5);
+    assert!((blips[0].position[1] - POINT[1]).abs() < 1.0);
 
     // Made-up events cannot pay, and teleporting there ends the run unpaid.
     for (name, payload) in [
@@ -511,6 +517,7 @@ fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
     });
     assert!(!player.text().contains("Taxi:"));
     assert_eq!(cash(&player), "$500");
+    assert!(player.host.blips().is_empty());
 
     // Driving there in time is paid once, and the menu no longer offers a
     // cancel for a finished run.
