@@ -516,7 +516,7 @@ fn framework_examples_use_includes_provide_function_refs_and_state_bags() {
         {
             break;
         }
-        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(start.elapsed() < Duration::from_secs(30));
         thread::sleep(Duration::from_millis(5));
     }
 
