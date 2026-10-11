@@ -28,7 +28,7 @@ pub const TEMPLATES: [(&str, &str, &str, &str); 2] = [
 ];
 
 /// Resources every template gets; server.cfg decides which ones start.
-pub const FILES: [(&str, &str); 29] = [
+pub const FILES: [(&str, &str); 33] = [
     data!("resources/[system]/chat/fxmanifest.lua"),
     data!("resources/[system]/chat/sv_chat.lua"),
     data!("resources/[managers]/mapmanager/fxmanifest.lua"),
@@ -57,6 +57,10 @@ pub const FILES: [(&str, &str); 29] = [
     data!("resources/[sarebox]/sarebox_admin/fxmanifest.lua"),
     data!("resources/[sarebox]/sarebox_admin/server.lua"),
     data!("resources/[sarebox]/sarebox_admin/client.lua"),
+    data!("resources/[sarebox]/sarebox_taxi/fxmanifest.lua"),
+    data!("resources/[sarebox]/sarebox_taxi/config.lua"),
+    data!("resources/[sarebox]/sarebox_taxi/server.lua"),
+    data!("resources/[sarebox]/sarebox_taxi/client.lua"),
     ("resources/[local]/.gitkeep", ""),
 ];
 

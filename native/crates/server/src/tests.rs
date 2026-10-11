@@ -520,23 +520,29 @@ fn framework_examples_use_includes_provide_function_refs_and_state_bags() {
         thread::sleep(Duration::from_millis(5));
     }
 
-    // Stopping the core makes its references unusable without crashing users.
+    // Stopping the core stops sare_jobs, which depends on it, so nothing
+    // keeps its stale references; ensuring sare_jobs brings both back.
+    shared.borrow_mut().capture = Some(String::new());
     console.execute_line(0, "stop sare_core");
+    assert!(!shared.borrow().resources["sare_jobs"].started);
+    assert!(shared
+        .borrow()
+        .capture
+        .as_ref()
+        .unwrap()
+        .contains("sare_jobs depends on sare_core; stopping it too."));
     assert!(shared
         .borrow()
         .refs
         .keys()
-        .all(|k| !k.starts_with("sare_core:")));
-    shared.borrow_mut().capture = Some(String::new());
-    send("/work");
-    let check = shared.clone();
-    run(&mut console, &mut known, &mut received, &|_| {
-        check
-            .borrow()
-            .capture
-            .as_ref()
-            .is_some_and(|c| c.contains("no longer exists"))
-    });
+        .all(|k| !k.starts_with("sare_core:") && !k.starts_with("sare_jobs:")));
+    console.execute_line(0, "ensure sare_jobs");
+    assert!(shared.borrow().resources["sare_core"].started);
+    // A restart of the core restarts its dependents after it.
+    console.execute_line(0, "restart sare-core");
+    for name in ["sare_core", "sare_jobs"] {
+        assert!(shared.borrow().resources[name].started, "{name}");
+    }
     drop(session);
     drop(shared);
     let _ = std::fs::remove_dir_all(root);

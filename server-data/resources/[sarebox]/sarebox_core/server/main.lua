@@ -21,8 +21,7 @@ AddEventHandler('onResourceStop', function(resource)
   if GetResourceState('spawnmanager') == 'started' then exports.spawnmanager:setAutoSpawn(true) end
 end)
 
-AddEventHandler('playerJoining', function()
-  local src = source
+local function loadPlayer(src)
   local player = Core.Functions.Login(src)
   local data = player.PlayerData
   if data.position then
@@ -31,12 +30,59 @@ AddEventHandler('playerJoining', function()
   else
     exports.spawnmanager:spawnPlayer(src)
   end
-  if not data.license then
-    Core.Functions.Notify(src, 'Your game did not send a player identity, so this character is not saved.', 'warning')
+  if data.pendingMigration then
+    Core.Functions.Notify(src, ('Your character from before the update (%s) waits for an admin to confirm it is yours. You play as a guest until then; nothing is saved.')
+      :format(data.pendingMigration), 'warning')
+  elseif not data.license then
+    Core.Functions.Notify(src, 'Your game did not send a player identity, so this character is not saved. Update the game.', 'warning')
   end
   TriggerEvent('sarebox:server:playerLoaded', player)
   TriggerClientEvent('sarebox:client:playerLoaded', src, data)
+end
+
+AddEventHandler('playerJoining', function()
+  loadPlayer(source)
 end)
+
+-- Approve or reject a claim on a character from before signed identities.
+RegisterCommand('sarebox_migrate', function(src, args)
+  local function say(text)
+    if src == 0 then print(text) else Core.Functions.Notify(src, text, 'inform', 'Admin') end
+  end
+  local target = tonumber(args[1])
+  local claim = target and Core.Pending[target]
+  local replace = false
+  if not claim and target and args[2] ~= 'reject' then
+    -- A player who already got a new character (for example while the
+    -- server ran new binaries with old SARE Box files) can still get the
+    -- old one back; the new one is unlinked, not deleted.
+    local license = GetPlayerIdentifierByType(target, 'license')
+    local old, citizenid = Core.Functions.LegacyClaim(target)
+    if license and old then
+      claim, replace = { license = license, legacy = old, citizenid = citizenid }, true
+    end
+  end
+  if not claim then
+    say('Usage: sarebox_migrate <server id> [reject]. That player claims no old character.')
+    return
+  end
+  print(('[admin] %s: sarebox_migrate %d %s (character %s)'):format(src == 0 and 'console' or GetPlayerName(src) .. ' (' .. src .. ')',
+    target, args[2] or 'approve', claim.citizenid))
+  Core.Pending[target] = nil
+  if args[2] == 'reject' then
+    Core.Functions.NewCharacter(target, claim.license)
+    Core.Functions.Notify(target, 'An admin did not confirm the old character. You start a new one.', 'warning')
+    say(('Rejected; %s gets a new character.'):format(GetPlayerName(target)))
+  elseif Core.Functions.MigrateCharacter(claim.license, claim.legacy, claim.citizenid, replace) then
+    Core.Functions.Notify(target, 'Your old character is back.', 'success')
+    say(('Moved character %s to %s.'):format(claim.citizenid, GetPlayerName(target)))
+  else
+    say('The old character was already moved, or this player already has a character.')
+    return
+  end
+  Core.Functions.Logout(target)
+  loadPlayer(target)
+end, true)
 
 AddEventHandler('playerDropped', function()
   Core.Functions.Logout(source)

@@ -117,6 +117,17 @@ fn main() -> Result<()> {
         );
     }
     let mut restart = false;
+    // Ctrl+C and SIGTERM (systemd, hosting panels) stop the server like
+    // `quit`: resources stop, players are saved and KVP is written.
+    let signalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let signalled = signalled.clone();
+        if let Err(error) =
+            ctrlc::set_handler(move || signalled.store(true, std::sync::atomic::Ordering::Relaxed))
+        {
+            out(&shared, format!("Cannot catch Ctrl+C: {error}"));
+        }
+    }
 
     let mut known: BTreeMap<u32, String> = BTreeMap::new();
     let mut published = String::new();
@@ -159,6 +170,9 @@ fn main() -> Result<()> {
                     ),
                 }
             }
+        }
+        if signalled.swap(false, std::sync::atomic::Ordering::Relaxed) && console.quit.is_none() {
+            console.quit = Some("Server stopped by the host.".into());
         }
         if let Some(reason) = console.quit.take() {
             out(&shared, format!("Stopping server: {reason}"));
@@ -298,7 +312,20 @@ fn boot(commands: Vec<Vec<String>>, resources_dir: PathBuf) -> Result<Server> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(sa_net::MAX_PLAYERS);
     session.set_max_clients(max);
-    session.set_identity_salt(&identity_salt(&shared, &resources_dir)?);
+    let key = server_key(&resources_dir)?;
+    out(
+        &shared,
+        format!("Server identity key: {}", key.public_hex()),
+    );
+    session.set_server_key(key);
+    let salt = legacy_salt(&shared, &resources_dir);
+    if !salt.is_empty() {
+        out(
+            &shared,
+            "identity.salt found: players' games also report their old (unsigned) license for character migration.",
+        );
+        session.set_identity_salt(&salt);
+    }
     shared.borrow_mut().session = Some(session.clone());
 
     for name in boot_order(&shared, &console.boot_resources) {
@@ -402,33 +429,58 @@ fn pump(
     Ok(())
 }
 
-/// `ensure` order, with dependencies first, without duplicates.
-/// Players' `license:` identifiers are salted per server so they cannot be
-/// matched across servers. The salt lives in `identity.salt` next to
-/// server.cfg (or `sv_identitySalt`); changing it changes every license.
-fn identity_salt(shared: &Shared, resources_dir: &Path) -> Result<String> {
+/// The server's identity key in `server.key` next to server.cfg, created on
+/// first start. Players' `license:` identifiers are their keys for this
+/// server key: back it up, because a new key gives every player a new
+/// license.
+fn server_key(resources_dir: &Path) -> Result<sa_net::identity::ServerKey> {
+    let path = resources_dir
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("server.key");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        return sa_net::identity::ServerKey::from_hex(&text).with_context(|| {
+            format!(
+                "{} is damaged. Restore it from a backup; deleting it gives every player a new license.",
+                path.display()
+            )
+        });
+    }
+    let key = sa_net::identity::ServerKey::generate();
+    write_private(&path, &key.secret_hex())
+        .with_context(|| format!("Cannot write {}", path.display()))?;
+    Ok(key)
+}
+fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()
+}
+/// The salt of the unsigned identities of earlier versions (`identity.salt`
+/// or `sv_identitySalt`), kept only so players can claim old characters.
+/// New servers have none.
+fn legacy_salt(shared: &Shared, resources_dir: &Path) -> String {
     if let Some(salt) = shared
         .borrow()
         .convar("sv_identitySalt")
         .filter(|s| !s.is_empty())
     {
-        return Ok(salt.to_string());
+        return salt.to_string();
     }
     let path = resources_dir
         .parent()
         .unwrap_or(Path::new("."))
         .join("identity.salt");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        if !text.trim().is_empty() {
-            return Ok(text.trim().to_string());
-        }
-    }
-    let mut random = [0u8; 16];
-    getrandom::fill(&mut random).map_err(|e| anyhow::anyhow!("no system randomness: {e}"))?;
-    let salt: String = random.iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::write(&path, &salt).with_context(|| format!("Cannot write {}", path.display()))?;
-    Ok(salt)
+    std::fs::read_to_string(path)
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default()
 }
+/// `ensure` order, with dependencies first, without duplicates.
 fn boot_order(shared: &Shared, requested: &[String]) -> Vec<String> {
     let requested: Vec<String> = requested
         .iter()
@@ -527,5 +579,7 @@ fn serve_rcon(
     }
 }
 
+#[cfg(test)]
+mod sarebox_tests;
 #[cfg(test)]
 mod tests;

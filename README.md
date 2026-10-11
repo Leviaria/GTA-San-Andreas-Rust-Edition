@@ -63,7 +63,8 @@ The headless server is set up like a FiveM server: `server-data/server.cfg`,
 commands, exports, threads), sandboxed client Lua with menus and dialogs drawn
 by the game ([client scripts](docs/client-scripts.md)), ACL and rcon. The first start asks for a template: Freeroam, or
 [SARE Box](docs/sarebox.md), a small roleplay framework with saved characters,
-money, jobs and an admin menu. Players chat with **T** and use the
+signed player licenses, money, jobs, a taxi job and an admin menu (SARE's own
+framework, not Qbox). Players chat with **T** and use the
 **F8** console. See [server setup](docs/server-hosting.md). Frameworks get
 `@resource` includes, `provide`, function references, server-side state bags
 and CfxLua syntax; ox_lib starts on the server, Qbox is not supported yet. See

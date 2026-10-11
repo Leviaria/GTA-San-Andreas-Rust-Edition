@@ -265,6 +265,9 @@ impl Console {
             }
             return;
         }
+        // `ensure sarebox` finds the resource that provides it.
+        let resolved = script::resolve(&self.shared, name);
+        let name = resolved.as_deref().unwrap_or(name);
         let started = self
             .shared
             .borrow()
@@ -276,9 +279,16 @@ impl Console {
             "start" if started => Ok(()),
             "start" => script::start(&self.shared, name),
             "restart" if !started => Err(anyhow::anyhow!("{name} is not started")),
-            _ if started => {
-                script::stop(&self.shared, name).and_then(|_| script::start(&self.shared, name))
-            }
+            // Dependents stop with it and start again after it.
+            _ if started => script::stop_tree(&self.shared, name).and_then(|dependents| {
+                script::start(&self.shared, name)?;
+                for dependent in dependents.iter().rev() {
+                    if let Err(error) = script::start(&self.shared, dependent) {
+                        self.say(format!("Couldn't start {dependent} again: {error:#}"));
+                    }
+                }
+                Ok(())
+            }),
             _ => script::start(&self.shared, name),
         };
         if let Err(error) = result {

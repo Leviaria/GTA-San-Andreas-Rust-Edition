@@ -187,6 +187,10 @@ writes; frame sizes, pending connections, output buffers and work per peer are
 bounded. Version, identity, name and finite/bounded position checks are applied.
 Inactive connections time out after ten seconds. Host identities are assigned
 by the host; guests cannot submit another player's ID or a world snapshot.
+Dedicated servers check each player's identity with a signed Ed25519
+challenge-response bound to the server's key, both sides' fresh nonces and
+the player's ID ([details](sarebox.md#player-identity)). Player-hosted
+sessions have no server key and give players no license.
 
 Sessions currently have no password, encryption or gameplay anti-cheat. Test
 with people you trust. Movement remains client-authoritative.

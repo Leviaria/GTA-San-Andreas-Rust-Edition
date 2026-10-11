@@ -214,7 +214,10 @@ impl Host {
                     .resources
                     .get(&resource)
                     .is_some_and(|r| r.sha256 == sha);
-                if valid_resource_name(&resource) && valid_sha && !running {
+                // A repeated announcement (a start broadcast racing the
+                // join announcement) must not download the bundle twice.
+                let requested = self.wanted.get(&sha) == Some(&resource);
+                if valid_resource_name(&resource) && valid_sha && !running && !requested {
                     self.wanted.retain(|_, r| r != &resource);
                     self.wanted.insert(sha.clone(), resource);
                     self.requests.push(sha);
@@ -231,9 +234,19 @@ impl Host {
             "sare:ui:context" => {
                 self.ui_mut().context = Ui::parse_context(&arg(0), Owner::Server);
             }
-            "sare:ui:hideContext" => self.ui_mut().context = None,
+            "sare:ui:hideContext" => {
+                let mut ui = self.ui_mut();
+                if ui
+                    .context
+                    .as_ref()
+                    .is_some_and(|c| c.owner == Owner::Server)
+                {
+                    ui.context = None;
+                }
+            }
             "sare:ui:text" => {
-                self.ui_mut().text = arg(0).as_str().map(|t| crate::ui::text(&json!(t)));
+                let text = arg(0).as_str().map(|t| crate::ui::text(&json!(t)));
+                self.ui_mut().set_text(Owner::Server, text);
             }
             "sare:ui:dialog" => {
                 let token = arg(0).as_i64().unwrap_or(0);
@@ -281,6 +294,17 @@ impl Host {
     /// `other` is still downloading.
     pub fn load(&mut self, sha256: &str, bytes: &[u8]) -> Result<(), String> {
         let Some(name) = self.wanted.remove(sha256) else {
+            // A second copy of a bundle that is already running (a quick
+            // restart asked for it twice) is not an error.
+            if self
+                .shared
+                .borrow()
+                .resources
+                .values()
+                .any(|r| r.sha256 == sha256)
+            {
+                return Ok(());
+            }
             return Err("bundle was not announced".into());
         };
         let bundle = Bundle::from_bytes(bytes)?;
@@ -377,16 +401,8 @@ impl Host {
         state
             .refs
             .retain(|key, _| key.rsplit_once(':').map(|(o, _)| o) != Some(name));
-        let owned = Owner::Resource(name.to_string());
-        if state.ui.context.as_ref().is_some_and(|c| c.owner == owned) {
-            state.ui.context = None;
-        }
-        if state.ui.dialog.as_ref().is_some_and(|d| d.owner == owned) {
-            state.ui.dialog = None;
-        }
-        if state.ui.progress.as_ref().is_some_and(|p| p.owner == owned) {
-            state.ui.progress = None;
-        }
+        // Menus, dialogs, progress bars and text it left open go with it.
+        state.ui.clear_owner(&Owner::Resource(name.to_string()));
     }
     /// Disconnecting: stop every client resource and clear the UI.
     pub fn stop_all(&mut self) {
@@ -1018,14 +1034,23 @@ fn create_state(
     func!(native, "ui_hide_context", shared, name, deadline, |_lua,
                                                               (): (
     )| {
-        shared.borrow_mut().ui.context = None;
+        // Only the resource's own menu: it cannot close another's.
+        let mut state = shared.borrow_mut();
+        let own = Owner::Resource(name.clone());
+        if state.ui.context.as_ref().is_some_and(|c| c.owner == own) {
+            state.ui.context = None;
+        }
         Ok(())
     });
     func!(native, "ui_text", shared, name, deadline, |_lua,
                                                       text: Option<
         String,
     >| {
-        shared.borrow_mut().ui.text = text.map(|t| crate::ui::text(&json!(t)));
+        let text = text.map(|t| crate::ui::text(&json!(t)));
+        shared
+            .borrow_mut()
+            .ui
+            .set_text(Owner::Resource(name.clone()), text);
         Ok(())
     });
     func!(native, "ui_dialog", shared, name, deadline, |lua,
@@ -1532,6 +1557,40 @@ mod tests {
         host.handle_event("__sare:resourceStop", "[\"app\"]");
         assert!(!host.command("/hello"));
         assert_eq!(host.resources(), vec!["lib".to_string()]);
+    }
+
+    #[test]
+    fn text_ui_is_per_resource_and_stopping_clears_its_ui() {
+        let mut host = Host::new();
+        let script = |label: &str| {
+            format!(
+                "UI.showTextUI('{label}')\n\
+                 UI.registerContext({{ id = 'm', title = '{label}', options = {{ {{ title = 'x' }} }} }})\n\
+                 RegisterCommand('{label}', function() UI.showContext('m') end)\n\
+                 RegisterCommand('{label}close', function() UI.hideContext() end)"
+            )
+        };
+        start(&mut host, 1, "hud", &[("client.lua", &script("hud"))]);
+        start(&mut host, 2, "job", &[("client.lua", &script("job"))]);
+        host.handle_event("sare:ui:text", r#"["server"]"#);
+        assert_eq!(host.ui().text.as_deref(), Some("hud\n\njob\n\nserver"));
+        // Another resource cannot close this resource's menu.
+        host.command("hud");
+        host.command("jobclose");
+        assert!(host.ui().context.is_some());
+        // Stopping the owner removes its text and menu; others stay.
+        host.handle_event("__sare:resourceStop", r#"["hud"]"#);
+        assert!(host.ui().context.is_none());
+        assert_eq!(host.ui().text.as_deref(), Some("job\n\nserver"));
+        // A quick restart that delivers the same bundle twice runs it once.
+        start(&mut host, 1, "hud", &[("client.lua", &script("hud"))]);
+        host.handle_event("__sare:resource", &json!(["hud", sha(1)]).to_string());
+        assert!(host.take_requests().is_empty());
+        assert!(host.load(&sha(1), b"ignored").is_ok());
+        assert_eq!(host.ui().text.as_deref(), Some("job\n\nserver\n\nhud"));
+        host.handle_event("sare:ui:text", "[null]");
+        host.handle_event("__sare:resourceStop", r#"["job"]"#);
+        assert_eq!(host.ui().text.as_deref(), Some("hud"));
     }
 
     #[test]

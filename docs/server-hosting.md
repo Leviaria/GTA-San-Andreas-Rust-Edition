@@ -68,8 +68,15 @@ for rcon) on the port for internet hosting.
 run from the console. Players run commands from chat (`/respawn`); built-in and
 restricted commands need `command.<name>` in the ACL.
 
-Player identity is the session ID only. There are no accounts or license
-identifiers yet, so grant admin per session (`add_principal player.3 group.admin`).
+Players have a signed `license:` identifier (see below); grant admin by
+license in `server.cfg`, or for one session with
+`add_principal player.3 group.admin`.
+
+`stop` and `restart` also stop the started resources that depend on the
+resource (by name or through `provide`), with a console line for each;
+`restart` and `ensure` start them again afterwards. The names accept provided
+names, such as `restart sarebox`. Ctrl+C and SIGTERM stop the server like
+`quit`, so resources stop and KVP is written.
 
 ## Resources and Lua
 
@@ -106,16 +113,22 @@ Client scripts run sandboxed on players' machines, and scripts show menus,
 dialogs, notifications and progress bars through the game's own UI; see
 [client scripts](client-scripts.md).
 
-Players have a `license:` identifier that stays the same on your server
-(see [SARE Box](sarebox.md#players-and-saving) for how it works and its
-limits), so the ACL can grant rights by license:
-`add_principal identifier.license:... group.admin`. Resource KVP
-(`SetResourceKvp`, `GetResourceKvpString` ...) saves to `kvp/<resource>.json`
-next to server.cfg.
+Players have a `license:` identifier that stays the same on your server: the
+player's own key for this server, checked with a signed challenge on every
+join (see [SARE Box: player identity](sarebox.md#player-identity)). It
+depends on `server.key` next to server.cfg, created on the first start; back
+it up. The ACL can grant rights by license:
+`add_principal identifier.license:... group.admin`. Servers from earlier
+versions keep `identity.salt`; then games also report their old, unsigned
+license as `legacy:...`, which is only a claim and never matches the ACL.
+Resource KVP (`SetResourceKvp`, `GetResourceKvpString` ...) saves to
+`kvp/<resource>.json` next to server.cfg, at most a second after a change.
+Saves are atomic, keep the previous file as `.json.bak`, and a damaged file is
+moved aside instead of being overwritten.
 
 Not supported yet: NUI pages (by design: use the script UI), OneSync entities, routing buckets, replicated state bags,
 databases (oxmysql is a Node.js resource), `PerformHttpRequest`, and identifiers
-other than `license` and `sare`. `playerConnecting` runs after the player has
+other than `license`, `sare` and `legacy`. `playerConnecting` runs after the player has
 joined, so a rejection drops them. FiveM resources that use GTA V natives must
 be adapted.
 

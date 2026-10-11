@@ -1,6 +1,7 @@
 //! Player-hosted prototype. Networking never runs on the render thread.
 //! Host assigns identities and relays poses; movement is client-authoritative.
 use serde::{Deserialize, Serialize};
+pub mod identity;
 pub mod passengers;
 pub mod relay;
 pub mod resources;
@@ -115,14 +116,36 @@ pub struct NetEvent {
 }
 static IDENTITY_SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// The player's secret key for every session this process joins. Servers
-/// receive only a hash of it with their own salt, so identities differ per
-/// server; a server that lies about its salt can still learn another
-/// server's identity for the player (there is no signature yet).
+/// never see it: they get a signature from a key derived from it for that
+/// server only (see [`identity`]).
 pub fn set_identity_secret(secret: &str) {
     let _ = IDENTITY_SECRET.set(secret.to_string());
 }
-fn identity(secret: &str, salt: &str) -> String {
+/// The unsigned identity of protocol 8 and earlier: a hash of the secret and
+/// the server's salt. Anyone who learns it can repeat it, so it is only sent
+/// as a claim for migrating old characters, never used as a license.
+fn legacy_identity(secret: &str, salt: &str) -> String {
     resources::hash(format!("sare-identity\n{secret}\n{salt}").as_bytes())
+}
+/// A player's identity on a host, after the signature check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerIdentity {
+    /// The player's public key for this server (64 hex digits).
+    pub license: String,
+    /// The protocol 8 identity the player's game computed for this server,
+    /// when the server still has its `identity.salt`. A claim, not a proof.
+    pub legacy: Option<String>,
+}
+/// Sent with `Welcome` when the host has a server key.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Challenge {
+    server_key: String,
+    nonce: String,
+    /// Signature over both nonces and the player ID (identity.rs).
+    proof: String,
+    /// Old servers' salt, so the game can name its old identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_salt: Option<String>,
 }
 
 pub fn valid_event(name: &str, payload: &str) -> bool {
@@ -164,15 +187,28 @@ enum Message {
         name: String,
         #[serde(default)]
         resources: Option<String>,
+        /// Client nonce for the identity check; absent before protocol 8.1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<String>,
     },
     Welcome {
         id: u32,
-        /// Per-server salt for the player's identity; empty when unused.
+        /// Protocol 8 salt. Always empty now, so older games send no
+        /// unsigned identity.
         #[serde(default)]
         salt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        challenge: Option<Challenge>,
     },
-    /// Clients: SHA-256 of the player's secret key and the server's salt.
+    /// Older games: an unsigned identity hash. Ignored.
     Identity(String),
+    /// Clients: the signed answer to `Welcome`'s challenge.
+    Auth {
+        key: String,
+        signature: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        legacy: Option<String>,
+    },
     Pose(Pose),
     Snapshot(Vec<Peer>),
     Reject(String),
@@ -316,9 +352,11 @@ struct Mailbox {
     /// Clients: bundles to request, and verified bundles received.
     script_requests: Mutex<Vec<String>>,
     script_files: Mutex<Vec<(String, Vec<u8>)>>,
-    /// Hosts: the salt sent with Welcome, and joined players' identities.
+    /// Hosts: the server key, the old salt for migration claims, and
+    /// joined players' checked identities.
+    server_key: Mutex<Option<Arc<identity::ServerKey>>>,
     identity_salt: Mutex<String>,
-    identities: Mutex<HashMap<u32, String>>,
+    identities: Mutex<HashMap<u32, PlayerIdentity>>,
 }
 impl Mailbox {
     fn receive(&self, event: NetEvent) {
@@ -518,15 +556,24 @@ impl Session {
     pub fn take_scripts(&self) -> Vec<(String, Vec<u8>)> {
         std::mem::take(&mut *self.mail.script_files.lock().unwrap())
     }
-    /// Hosts only: the salt that makes players' identities unique to this
-    /// server. Set it before players join; without one, players have none.
+    /// Hosts only: the key that players sign their identity for. Set it
+    /// before players join; without one, players have no license.
+    pub fn set_server_key(&self, key: identity::ServerKey) {
+        *self.mail.server_key.lock().unwrap() = Some(Arc::new(key));
+    }
+    /// Hosts only: the salt of protocol 8 identities. With one, players'
+    /// games also report their old identity as a migration claim.
     pub fn set_identity_salt(&self, salt: &str) {
         *self.mail.identity_salt.lock().unwrap() =
             salt.chars().filter(|c| !c.is_control()).take(128).collect();
     }
-    /// Hosts only: a joined player's identity (64 hex digits), stable for
-    /// the same player key and server salt.
+    /// Hosts only: a joined player's license (their signature-checked
+    /// public key for this server, 64 hex digits).
     pub fn identity(&self, id: u32) -> Option<String> {
+        self.player_identity(id).map(|i| i.license)
+    }
+    /// Hosts only: the license and any old-identity claim.
+    pub fn player_identity(&self, id: u32) -> Option<PlayerIdentity> {
         self.mail.identities.lock().unwrap().get(&id).cloned()
     }
     /// Hosts only: admitted player limit (1..=MAX_PLAYERS), like `sv_maxclients`.
@@ -572,7 +619,9 @@ struct Guest {
     transfer: Option<(String, Arc<[u8]>, usize)>,
     scripts: VecDeque<String>,
     budget: (Instant, u32),
-    identity: Option<String>,
+    /// (client nonce, server nonce) while the identity check is open.
+    challenge: Option<(String, String)>,
+    identity: Option<PlayerIdentity>,
 }
 #[allow(clippy::too_many_arguments)]
 fn host_worker(
@@ -620,6 +669,7 @@ fn host_worker(
                 transfer: None,
                 scripts: VecDeque::new(),
                 budget: (Instant::now(), 0),
+                challenge: None,
                 identity: None,
             });
             next_id = next_id.wrapping_add(1).max(1);
@@ -659,7 +709,7 @@ fn host_worker(
                         let Some(data) = share.blob(&sha256) else { return false; };
                         guest.transfer = Some((sha256, data, 0));
                     }
-                    Message::Hello { version, name, resources } if !guest.hello && !guest.assets => {
+                    Message::Hello { version, name, resources, nonce } if !guest.hello && !guest.assets => {
                         if resources.as_ref().is_some_and(|value| value != &fingerprint)
                             || (!share.manifest.resources.is_empty() && resources.as_ref() != Some(&fingerprint)) {
                             let _ = guest.wire.queue(&Message::Reject("Server resource versions do not match. Prepare server mods before joining.".into()));
@@ -684,24 +734,50 @@ fn host_worker(
                         admitted += 1;
                         guest.peer.name = safe_name(&name);
                         guest.hello = true;
+                        let key = mail.server_key.lock().unwrap().clone();
+                        let challenge = match (key, nonce) {
+                            (Some(key), Some(client)) if identity::valid_hex32(&client) => {
+                                let client = client.to_ascii_lowercase();
+                                let server = identity::nonce();
+                                let proof = identity::sign_welcome(&key, &client, &server, guest.peer.id);
+                                let salt = mail.identity_salt.lock().unwrap().clone();
+                                guest.challenge = Some((client, server.clone()));
+                                Some(Challenge {
+                                    server_key: key.public_hex(),
+                                    nonce: server,
+                                    proof,
+                                    legacy_salt: (!salt.is_empty()).then_some(salt),
+                                })
+                            }
+                            _ => None,
+                        };
                         if guest
                             .wire
                             .queue(&Message::Welcome {
                                 id: guest.peer.id,
-                                salt: mail.identity_salt.lock().unwrap().clone(),
+                                salt: String::new(),
+                                challenge,
                             })
                             .is_err()
                         {
                             return false;
                         }
                     }
-                    Message::Identity(identity)
-                        if guest.hello
-                            && guest.identity.is_none()
-                            && identity.len() == 64
-                            && identity.bytes().all(|b| b.is_ascii_hexdigit()) =>
-                    {
-                        guest.identity = Some(identity.to_ascii_lowercase());
+                    // Older games' unsigned identity: no license.
+                    Message::Identity(_) if guest.hello => {}
+                    Message::Auth { key, signature, legacy } if guest.hello && guest.identity.is_none() => {
+                        let Some((client, server)) = guest.challenge.take() else { return false; };
+                        let Some(server_key) = mail.server_key.lock().unwrap().as_ref().map(|k| k.public_hex()) else { return false; };
+                        let key = key.to_ascii_lowercase();
+                        let legacy = legacy.map(|l| l.to_ascii_lowercase());
+                        let legacy_ok = legacy.as_deref().is_none_or(identity::valid_hex32)
+                            && (legacy.is_none() || !mail.identity_salt.lock().unwrap().is_empty());
+                        if !legacy_ok || !identity::verify_auth(&server_key, &client, &server, guest.peer.id, &key, legacy.as_deref(), &signature) {
+                            let _ = guest.wire.queue(&Message::Reject("Player identity check failed.".into()));
+                            let _ = guest.wire.flush();
+                            return false;
+                        }
+                        guest.identity = Some(PlayerIdentity { license: key, legacy });
                     }
                     Message::Ping(nonce) if guest.hello => {
                         if guest.wire.queue(&Message::Pong(nonce)).is_err(){return false;}
@@ -817,10 +893,13 @@ fn client_stream(
     mail: &Mailbox,
 ) -> io::Result<()> {
     let mut wire = Wire::new(stream)?;
+    // Without a player secret there is nothing to sign: no identity check.
+    let client_nonce = IDENTITY_SECRET.get().map(|_| identity::nonce());
     wire.queue(&Message::Hello {
         version: VERSION,
         name,
         resources: fingerprint,
+        nonce: client_nonce.clone(),
     })?;
     let mut id = None;
     let mut next_tick = Instant::now();
@@ -836,11 +915,43 @@ fn client_stream(
         }
         for message in wire.read()? {
             match message {
-                Message::Welcome { id: assigned, salt } if id.is_none() && assigned != 0 => {
+                Message::Welcome {
+                    id: assigned,
+                    challenge,
+                    ..
+                } if id.is_none() && assigned != 0 => {
                     id = Some(assigned);
-                    if let (Some(secret), false) = (IDENTITY_SECRET.get(), salt.is_empty()) {
-                        let identity = identity(secret, &salt);
-                        wire.queue(&Message::Identity(identity))?;
+                    if let (Some(secret), Some(client), Some(challenge)) =
+                        (IDENTITY_SECRET.get(), &client_nonce, challenge)
+                    {
+                        // The server must prove it holds the key it named
+                        // before the game signs anything for that key.
+                        if !identity::verify_welcome(
+                            &challenge.server_key,
+                            client,
+                            &challenge.nonce,
+                            assigned,
+                            &challenge.proof,
+                        ) {
+                            return Err(io::Error::other("The server failed its identity check."));
+                        }
+                        let legacy = challenge
+                            .legacy_salt
+                            .as_deref()
+                            .map(|salt| legacy_identity(secret, salt));
+                        let (key, signature) = identity::sign_auth(
+                            secret,
+                            &challenge.server_key,
+                            client,
+                            &challenge.nonce,
+                            assigned,
+                            legacy.as_deref(),
+                        );
+                        wire.queue(&Message::Auth {
+                            key,
+                            signature,
+                            legacy,
+                        })?;
                     }
                 }
                 Message::Snapshot(peers) if id.is_some() => {
@@ -990,12 +1101,15 @@ mod tests {
         assert!(!host.mail.scripts.lock().unwrap().contains_key(&newer));
     }
     #[test]
-    fn identities_are_salted_per_server_and_stay_off_snapshots() {
+    fn identities_are_signed_per_server_and_stay_off_snapshots() {
         set_identity_secret("player-secret");
         let secret = IDENTITY_SECRET.get().unwrap().clone();
         let mut seen = Vec::new();
-        for salt in ["server-a", "server-b"] {
+        for salt in ["", "old-salt"] {
+            let key = identity::ServerKey::generate();
+            let public = key.public_hex();
             let host = Session::host(address(), "Host").unwrap();
+            host.set_server_key(key);
             host.set_identity_salt(salt);
             let guest = Session::join(host.address, "Guest").unwrap();
             let mut id = 0;
@@ -1004,19 +1118,136 @@ mod tests {
                 id = report(&guest).local_id;
                 id != 0 && host.identity(id).is_some()
             });
-            let identity = host.identity(id).unwrap();
-            assert_eq!(identity, super::identity(&secret, salt));
+            let checked = host.player_identity(id).unwrap();
+            assert_eq!(checked.license, identity::license(&secret, &public));
+            // Old servers also get the old identity, as a claim only.
+            let legacy = (!salt.is_empty()).then(|| legacy_identity(&secret, salt));
+            assert_eq!(checked.legacy, legacy);
             assert!(!serde_json::to_string(&report(&guest).peers)
                 .unwrap()
-                .contains(&identity));
-            seen.push(identity);
+                .contains(&checked.license));
+            seen.push(checked.license);
         }
         assert_ne!(seen[0], seen[1]);
-        // Without a salt the server gets no identity.
+        // Without a server key the server gets no identity.
         let host = Session::host(address(), "Host").unwrap();
         let guest = Session::join(host.address, "Guest").unwrap();
         wait(|| report(&guest).local_id != 0 && report(&host).peers.len() >= 2);
         assert_eq!(host.identity(report(&guest).local_id), None);
+    }
+
+    /// A raw client speaking the protocol by hand.
+    fn handshake(host: &Session, nonce: Option<String>) -> (Wire, u32, Option<Challenge>) {
+        let mut wire = Wire::new(TcpStream::connect(host.address).unwrap()).unwrap();
+        wire.queue(&Message::Hello {
+            version: VERSION,
+            name: "Raw".into(),
+            resources: None,
+            nonce,
+        })
+        .unwrap();
+        wire.flush().unwrap();
+        let mut welcome = None;
+        wait(|| {
+            host.update(Pose::default());
+            for message in wire.read().unwrap() {
+                if let Message::Welcome { id, challenge, .. } = message {
+                    welcome = Some((id, challenge));
+                }
+            }
+            welcome.is_some()
+        });
+        let (id, challenge) = welcome.unwrap();
+        (wire, id, challenge)
+    }
+    fn closed(host: &Session, wire: &mut Wire) {
+        wait(|| {
+            host.update(Pose::default());
+            let _ = wire.flush();
+            wire.read().is_err() || wire.closed
+        });
+    }
+
+    #[test]
+    fn replayed_forged_and_unsigned_identities_are_refused() {
+        let host = Session::host(address(), "Host").unwrap();
+        host.set_server_key(identity::ServerKey::generate());
+        host.set_identity_salt("old-salt");
+
+        // An honest answer, recorded by an eavesdropper.
+        let client = identity::nonce();
+        let (mut wire, id, challenge) = handshake(&host, Some(client.clone()));
+        let challenge = challenge.expect("signed challenge");
+        assert!(identity::verify_welcome(
+            &challenge.server_key,
+            &client,
+            &challenge.nonce,
+            id,
+            &challenge.proof
+        ));
+        let (key, signature) = identity::sign_auth(
+            "victim",
+            &challenge.server_key,
+            &client,
+            &challenge.nonce,
+            id,
+            None,
+        );
+        let recorded = Message::Auth {
+            key: key.clone(),
+            signature,
+            legacy: None,
+        };
+        wire.queue(&recorded).unwrap();
+        wire.flush().unwrap();
+        wait(|| {
+            host.update(Pose::default());
+            host.identity(id).is_some()
+        });
+        assert_eq!(host.identity(id), Some(key.clone()));
+
+        // Replaying it on a new connection fails: new nonces, new player ID.
+        let (mut replay, other, _) = handshake(&host, Some(client.clone()));
+        replay.queue(&recorded).unwrap();
+        closed(&host, &mut replay);
+        assert_eq!(host.identity(other), None);
+
+        // Claiming someone's old identity without a matching signature fails.
+        let client = identity::nonce();
+        let (mut forged, other, challenge) = handshake(&host, Some(client.clone()));
+        let challenge = challenge.unwrap();
+        let (key, signature) = identity::sign_auth(
+            "attacker",
+            &challenge.server_key,
+            &client,
+            &challenge.nonce,
+            other,
+            None,
+        );
+        forged
+            .queue(&Message::Auth {
+                key,
+                signature,
+                legacy: Some("a".repeat(64)),
+            })
+            .unwrap();
+        closed(&host, &mut forged);
+        assert_eq!(host.identity(other), None);
+
+        // An older game's unsigned identity is accepted as a connection
+        // but gives no license.
+        let (mut old, other, challenge) = handshake(&host, None);
+        assert!(challenge.is_none());
+        old.queue(&Message::Identity("b".repeat(64))).unwrap();
+        old.queue(&Message::Pose(Pose::default())).unwrap();
+        wait(|| {
+            host.update(Pose::default());
+            let _ = old.flush();
+            let _ = old.read();
+            report(&host).peers.iter().any(|p| p.id == other)
+        });
+        assert_eq!(host.identity(other), None);
+        drop(wire);
     }
     fn address() -> SocketAddr {
         "127.0.0.1:0".parse().unwrap()
@@ -1047,6 +1278,7 @@ mod tests {
         let data = serde_json::to_vec(&Message::Welcome {
             id: 7,
             salt: String::new(),
+            challenge: None,
         })
         .unwrap();
         let mut frame = (data.len() as u32).to_le_bytes().to_vec();
@@ -1337,6 +1569,7 @@ mod tests {
                 version: VERSION + 1,
                 name: "Bad".into(),
                 resources: None,
+                nonce: None,
             })
             .unwrap();
         intruder.flush().unwrap();

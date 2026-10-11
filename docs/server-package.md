@@ -27,6 +27,10 @@ start-relay.*      optional relay for a server browser and join codes
 4. For internet hosting, allow TCP and UDP 7777 in the firewall/router,
    or publish through a relay with `set sv_relay "ip:port"`.
 
+The first start also creates `server-data/server.key`, the key players' licenses
+are signed for. Back it up with your `kvp/` folder: a new key gives every
+player a new license.
+
 Put your own resources in `server-data/resources/[local]/` and add
 `ensure name` to `server.cfg`. Extra launch arguments use FiveM syntax:
 `start-server.cmd +set sv_maxclients 8`.
@@ -48,7 +52,9 @@ For systemd or hosting panels, set `SARE_SERVER_SUPERVISED=1` and restart the
 process when it exits with code 42.
 
 To update manually, download the newest server ZIP and replace only the
-`server/` folder, just like updating FXServer artifacts.
+`server/` folder, just like updating FXServer artifacts. Updates never change
+your resources: when release notes say the shipped resources changed (for
+example SARE Box), copy those folders from the new ZIP's `server-data/resources/`.
 
 Full reference: <https://github.com/LordM8YT/GTA-San-Andreas-Rust-Edition/blob/main/docs/server-hosting.md>
 Help and people to play with: <https://discord.gg/F8KwXJqw6D>

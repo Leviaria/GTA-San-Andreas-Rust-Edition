@@ -36,24 +36,31 @@ fn vector3(lua: &Lua, [x, y, z]: [f32; 3]) -> mlua::Result<Value> {
     let make: Function = lua.globals().get("vector3")?;
     make.call((x, y, z))
 }
-/// `license:<hex>` when the player's game sent an identity (unique to this
-/// server's salt), then the session's `sare:<id>`.
+/// `license:<hex>` when the player's game passed the signed identity check
+/// (unique to this server's key), the session's `sare:<id>`, and
+/// `legacy:<hex>` when the game also claimed an identity of the old unsigned
+/// kind (for migrating characters; anyone can claim one, see sarebox.md).
 pub fn identifiers(shared: &Shared, id: u32) -> Vec<String> {
     let session = shared.borrow().session.clone();
-    let mut list: Vec<String> = session
-        .and_then(|s| s.identity(id))
-        .map(|identity| format!("license:{identity}"))
-        .into_iter()
-        .collect();
+    let identity = session.and_then(|s| s.player_identity(id));
+    let mut list = Vec::new();
+    if let Some(identity) = &identity {
+        list.push(format!("license:{}", identity.license));
+    }
     list.push(format!("sare:{id}"));
+    if let Some(legacy) = identity.and_then(|i| i.legacy) {
+        list.push(format!("legacy:{legacy}"));
+    }
     list
 }
 /// ACL principals of a player: `player.<id>` and `identifier.<identifier>`.
+/// An unproven `legacy:` claim never grants permissions.
 pub fn principals(shared: &Shared, id: u32) -> Vec<String> {
     let mut list = vec![format!("player.{id}")];
     list.extend(
         identifiers(shared, id)
             .into_iter()
+            .filter(|i| !i.starts_with("legacy:"))
             .map(|i| format!("identifier.{i}")),
     );
     list
@@ -795,8 +802,8 @@ pub fn create_state(shared: &Shared, resource: &str) -> Result<Lua> {
                 .and_then(|p| identifiers(&shared, p.id).into_iter().nth(index)))
         }
     );
-    // `license` (salted per server) and `sare` exist; `discord`, `fivem`,
-    // `steam` and others return nil.
+    // `license` (signed, per server), `sare` and `legacy` exist; `discord`,
+    // `fivem`, `steam` and others return nil.
     func!(g, "GetPlayerIdentifierByType", shared, name, |_lua,
                                                          (
         player,

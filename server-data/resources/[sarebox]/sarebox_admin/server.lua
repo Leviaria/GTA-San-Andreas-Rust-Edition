@@ -86,8 +86,16 @@ function actions.announce(_, ...)
   TriggerClientEvent('sare:ui:notify', -1, { title = 'Announcement', description = text, type = 'warning', duration = 8000 })
 end
 
-for name, action in pairs(actions) do
-  RegisterCommand(name, function(src, args) action(src, table.unpack(args)) end, true)
+-- Every admin action is logged on the server console with who did it.
+local function run(src, name, args)
+  local who = src == 0 and 'console' or ('%s (%d, %s)'):format(GetPlayerName(src), src,
+    GetPlayerIdentifierByType(src, 'license') or 'no license')
+  print(('[admin] %s: %s %s'):format(who, name, table.concat(args, ' ')))
+  actions[name](src, table.unpack(args))
+end
+
+for name in pairs(actions) do
+  RegisterCommand(name, function(src, args) run(src, name, args) end, true)
 end
 
 -- The admin menu (F11 or /admin): the client asks, the server checks again
@@ -115,6 +123,7 @@ RegisterNetEvent('sarebox_admin:action', function(name, args)
     return
   end
   if type(args) ~= 'table' then args = {} end
-  for i = 1, #args do args[i] = tostring(args[i]) end
-  actions[name](src, table.unpack(args))
+  local clean = {}
+  for i = 1, math.min(#args, 8) do clean[i] = tostring(args[i]):sub(1, 256) end
+  run(src, name, clean)
 end)

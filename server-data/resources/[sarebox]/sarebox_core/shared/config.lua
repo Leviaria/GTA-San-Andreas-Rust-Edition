@@ -3,6 +3,9 @@ Config = {}
 
 Config.StartMoney = { cash = 500, bank = 5000 }
 
+-- Largest balance and largest single change, in whole dollars.
+Config.MaxMoney = 1000000000
+
 -- Paid to the bank account of on-duty players every PaycheckMinutes.
 Config.PaycheckMinutes = 10
 

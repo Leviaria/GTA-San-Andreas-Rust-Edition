@@ -16,3 +16,9 @@ Server hosts: download `SARE-server-windows.zip` or `SARE-server-linux.zip`, a
 FiveM-style dedicated server with binaries in `server/` and your configuration in
 `server-data/`. Started with start-server.cmd/.sh it updates itself from new
 releases while no players are online. See docs/server-package.md.
+
+SARE Box servers: player licenses are now signed per server (`server.key`).
+Copy `server-data/resources/[sarebox]/` from the new server ZIP over yours,
+then re-add admins with their new license (`/id`). Old characters move to the
+new licenses with `sarebox_migrate`; see docs/sarebox.md. Players need this
+client version to keep a saved character.
