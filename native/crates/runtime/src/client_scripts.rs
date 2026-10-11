@@ -1,6 +1,9 @@
 //! The server's client scripts: downloads bundles, feeds the sandbox what
 //! scripts may read each frame and applies what they asked for.
-use super::{State, ORIGIN};
+use super::{
+    menu::{blip_color, MapBlip},
+    State, ORIGIN,
+};
 use sa_lua::client::{Output, PlayerView, View};
 use winit::keyboard::KeyCode;
 
@@ -74,6 +77,30 @@ impl State {
         } else if !wants {
             self.release_script_cursor();
         }
+    }
+    /// Script blips and the GPS line to the route blip, for radar and map.
+    pub(super) fn update_map_overlay(&mut self, coordinates: [f32; 3]) {
+        let at = [coordinates[0], coordinates[1]];
+        let blips = self.scripts.blips();
+        let route = blips.iter().rev().find(|blip| blip.route);
+        self.gps.update(
+            self.roads.as_ref(),
+            at,
+            route.map(|blip| [blip.position[0], blip.position[1]]),
+        );
+        let overlay = &mut self.menu.overlay;
+        overlay.route = self.gps.line(at);
+        overlay.route_color = route.map_or(Default::default(), |blip| blip_color(blip.colour));
+        overlay.blips = blips
+            .iter()
+            .map(|blip| MapBlip {
+                position: [blip.position[0], blip.position[1]],
+                color: blip_color(blip.colour),
+                label: blip.label.clone(),
+                route: blip.route,
+                short_range: blip.short_range,
+            })
+            .collect();
     }
     pub(super) fn release_script_cursor(&mut self) {
         if std::mem::take(&mut self.script_cursor)

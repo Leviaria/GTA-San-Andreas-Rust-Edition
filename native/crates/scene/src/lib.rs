@@ -3,6 +3,7 @@ pub mod collision;
 mod mods;
 pub use mods::{share_resource_folders, share_resources};
 pub mod ped;
+pub mod roads;
 mod roadsign;
 mod texture;
 pub mod vehicle;

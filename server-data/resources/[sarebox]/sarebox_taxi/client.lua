@@ -1,6 +1,7 @@
 -- Taxi menu and directions. Everything that matters (where to go, the fare,
 -- arrival and payment) is decided by the server; this only shows it.
 local run = nil
+local blip = nil
 
 local directions = { 'north', 'north-east', 'east', 'south-east', 'south', 'south-west', 'west', 'north-west' }
 local function direction(dx, dy)
@@ -19,13 +20,28 @@ local function draw()
   UI.showTextUI(('Taxi: drive to %s\n%s  |  fare $%d'):format(run.label, where, run.fare))
 end
 
+-- The dispatch point on the radar and map, with the GPS route to it.
+local function clearBlip()
+  if blip then RemoveBlip(blip) end
+  blip = nil
+end
+
 RegisterNetEvent('sarebox_taxi:client:route', function(data)
   run = data
+  clearBlip()
+  blip = AddBlipForCoord(run.x, run.y, run.z)
+  SetBlipSprite(blip, 198)
+  SetBlipColour(blip, 5)
+  SetBlipRoute(blip, true)
+  BeginTextCommandSetBlipName('STRING')
+  AddTextComponentString('Taxi: ' .. run.label)
+  EndTextCommandSetBlipName(blip)
   draw()
 end)
 
 RegisterNetEvent('sarebox_taxi:client:clear', function()
   run = nil
+  clearBlip()
   UI.hideTextUI()
 end)
 

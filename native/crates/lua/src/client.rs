@@ -60,6 +60,23 @@ pub enum Output {
     Console(String),
 }
 
+/// A map marker a client script placed (`AddBlipForCoord`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blip {
+    pub handle: i64,
+    /// San Andreas world coordinates.
+    pub position: [f32; 3],
+    /// FiveM blip colour index.
+    pub colour: i64,
+    pub sprite: i64,
+    pub label: Option<String>,
+    /// Show the GPS route to it.
+    pub route: bool,
+    /// Only on the radar when it is in range (no arrow at the edge).
+    pub short_range: bool,
+}
+const MAX_BLIPS: usize = 256;
+
 struct Resource {
     lua: Lua,
     bundle: Rc<Bundle>,
@@ -81,6 +98,11 @@ struct Shared {
     ref_checks: Vec<String>,
     invoking: Vec<String>,
     cancelled: bool,
+    /// Blips by handle, with the resource that placed them.
+    blips: BTreeMap<i64, (String, Blip)>,
+    next_blip: i64,
+    /// Name collected by Begin/AddTextComponent for EndTextCommandSetBlipName.
+    blip_text: String,
 }
 type SharedRef = Rc<RefCell<Shared>>;
 
@@ -169,6 +191,11 @@ impl Host {
     }
     pub fn ui_mut(&self) -> std::cell::RefMut<'_, Ui> {
         std::cell::RefMut::map(self.shared.borrow_mut(), |s| &mut s.ui)
+    }
+    /// Map markers, oldest first.
+    pub fn blips(&self) -> Vec<Blip> {
+        let state = self.shared.borrow();
+        state.blips.values().map(|(_, b)| b.clone()).collect()
     }
     pub fn now_ms(&self) -> i64 {
         self.shared.borrow().now_ms
@@ -401,8 +428,9 @@ impl Host {
         state
             .refs
             .retain(|key, _| key.rsplit_once(':').map(|(o, _)| o) != Some(name));
-        // Menus, dialogs, progress bars and text it left open go with it.
+        // Menus, dialogs, progress bars, text and blips it left go with it.
         state.ui.clear_owner(&Owner::Resource(name.to_string()));
+        state.blips.retain(|_, (owner, _)| owner != name);
     }
     /// Disconnecting: stop every client resource and clear the UI.
     pub fn stop_all(&mut self) {
@@ -412,7 +440,9 @@ impl Host {
         self.wanted.clear();
         self.ready.clear();
         self.requests.clear();
-        self.shared.borrow_mut().ui = Ui::default();
+        let mut state = self.shared.borrow_mut();
+        state.ui = Ui::default();
+        state.blips.clear();
     }
 
     fn dispatch_local(&self, names: &[&str], args: &[Json]) {
@@ -1374,6 +1404,164 @@ fn create_state(
         }
     );
 
+    // Blips: a resource changes only the blips it placed.
+    fn with_blip(shared: &SharedRef, name: &str, handle: i64, f: impl FnOnce(&mut Blip)) {
+        if let Some((owner, blip)) = shared.borrow_mut().blips.get_mut(&handle) {
+            if owner == name {
+                f(blip);
+            }
+        }
+    }
+    func!(g, "AddBlipForCoord", shared, name, deadline, |_lua,
+                                                         (
+        x,
+        y,
+        z,
+    ): (
+        f32,
+        f32,
+        Option<f32>
+    )| {
+        let z = z.unwrap_or(0.0);
+        let mut state = shared.borrow_mut();
+        if ![x, y, z].iter().all(|v| v.is_finite()) || state.blips.len() >= MAX_BLIPS {
+            return Ok(0);
+        }
+        state.next_blip += 1;
+        let handle = state.next_blip;
+        let blip = Blip {
+            handle,
+            position: [x, y, z],
+            colour: 0,
+            sprite: 1,
+            label: None,
+            route: false,
+            short_range: false,
+        };
+        state.blips.insert(handle, (name.clone(), blip));
+        Ok(handle)
+    });
+    func!(g, "RemoveBlip", shared, name, deadline, |_lua, handle: i64| {
+        let mut state = shared.borrow_mut();
+        if state.blips.get(&handle).is_some_and(|(owner, _)| owner == name) {
+            state.blips.remove(&handle);
+        }
+        Ok(())
+    });
+    func!(
+        g,
+        "DoesBlipExist",
+        shared,
+        name,
+        deadline,
+        |_lua, handle: Option<i64>| Ok(handle.is_some_and(|h| shared.borrow().blips.contains_key(&h)))
+    );
+    func!(g, "SetBlipCoords", shared, name, deadline, |_lua,
+                                                       (
+        handle,
+        x,
+        y,
+        z,
+    ): (
+        i64,
+        f32,
+        f32,
+        Option<f32>
+    )| {
+        let z = z.unwrap_or(0.0);
+        if [x, y, z].iter().all(|v| v.is_finite()) {
+            with_blip(shared, name, handle, |b| b.position = [x, y, z]);
+        }
+        Ok(())
+    });
+    func!(g, "GetBlipCoords", shared, name, deadline, |lua, handle: i64| {
+        let [x, y, z] = shared
+            .borrow()
+            .blips
+            .get(&handle)
+            .map_or([0.0; 3], |(_, b)| b.position);
+        let make: Function = lua.globals().get("vector3")?;
+        make.call::<Value>((x, y, z))
+    });
+    func!(g, "SetBlipColour", shared, name, deadline, |_lua,
+                                                       (
+        handle,
+        colour,
+    ): (
+        i64,
+        i64
+    )| {
+        with_blip(shared, name, handle, |b| b.colour = colour);
+        Ok(())
+    });
+    func!(g, "SetBlipSprite", shared, name, deadline, |_lua,
+                                                       (
+        handle,
+        sprite,
+    ): (
+        i64,
+        i64
+    )| {
+        with_blip(shared, name, handle, |b| b.sprite = sprite);
+        Ok(())
+    });
+    func!(g, "SetBlipRoute", shared, name, deadline, |_lua,
+                                                      (
+        handle,
+        enabled,
+    ): (
+        i64,
+        bool
+    )| {
+        with_blip(shared, name, handle, |b| b.route = enabled);
+        Ok(())
+    });
+    func!(g, "SetBlipAsShortRange", shared, name, deadline, |_lua,
+                                                             (
+        handle,
+        enabled,
+    ): (
+        i64,
+        bool
+    )| {
+        with_blip(shared, name, handle, |b| b.short_range = enabled);
+        Ok(())
+    });
+    func!(
+        g,
+        "BeginTextCommandSetBlipName",
+        shared,
+        name,
+        deadline,
+        |_lua, _kind: Option<String>| {
+            shared.borrow_mut().blip_text.clear();
+            Ok(())
+        }
+    );
+    for component in ["AddTextComponentString", "AddTextComponentSubstringPlayerName"] {
+        func!(g, component, shared, name, deadline, |_lua, text: String| {
+            let mut state = shared.borrow_mut();
+            if state.blip_text.len() + text.len() <= 128 {
+                state.blip_text.push_str(&text);
+            }
+            Ok(())
+        });
+    }
+    func!(
+        g,
+        "EndTextCommandSetBlipName",
+        shared,
+        name,
+        deadline,
+        |_lua, handle: i64| {
+            let text = std::mem::take(&mut shared.borrow_mut().blip_text);
+            with_blip(shared, name, handle, |b| {
+                b.label = (!text.is_empty()).then_some(text)
+            });
+            Ok(())
+        }
+    );
+
     let prelude = format!("{}\n{}", crate::COMMON_PRELUDE, include_str!("client.lua"));
     lua.load(&prelude)
         .set_name("@citizen:/scripting/lua/scheduler.lua")
@@ -1678,4 +1866,62 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn blips_belong_to_their_resource_and_go_when_it_stops() {
+        let mut host = Host::new();
+        start(
+            &mut host,
+            1,
+            "taxi",
+            &[(
+                "client.lua",
+                r#"
+                blip = AddBlipForCoord(100.5, -200.0, 13.0)
+                SetBlipColour(blip, 5)
+                SetBlipRoute(blip, true)
+                BeginTextCommandSetBlipName('STRING')
+                AddTextComponentString('Dispatch')
+                EndTextCommandSetBlipName(blip)
+                RegisterCommand('drop', function() RemoveBlip(blip) end)
+                "#,
+            )],
+        );
+        start(
+            &mut host,
+            2,
+            "other",
+            &[(
+                "client.lua",
+                r#"
+                RemoveBlip(1)
+                SetBlipRoute(1, false)
+                assert(DoesBlipExist(1))
+                assert(not DoesBlipExist(99))
+                assert(GetBlipCoords(1).x == 100.5)
+                AddBlipForCoord(0/0, 1, 1)
+                AddBlipForCoord(5, 6)
+                "#,
+            )],
+        );
+        let blips = host.blips();
+        assert_eq!(blips.len(), 2, "{:?}", host.take_outputs());
+        assert_eq!(
+            blips[0],
+            Blip {
+                handle: 1,
+                position: [100.5, -200.0, 13.0],
+                colour: 5,
+                sprite: 1,
+                label: Some("Dispatch".into()),
+                route: true,
+                short_range: false,
+            }
+        );
+        assert_eq!(blips[1].position, [5.0, 6.0, 0.0]);
+        host.stop("other");
+        assert_eq!(host.blips().len(), 1);
+        assert!(host.command("drop"));
+        assert!(host.blips().is_empty());
+    }
+
 }

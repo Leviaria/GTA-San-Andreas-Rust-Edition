@@ -19,6 +19,62 @@ pub struct RadarTile {
     pub texture: egui::TextureId,
 }
 
+/// A script blip as the radar and map draw it (SA world x, y).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapBlip {
+    pub position: [f32; 2],
+    pub color: Color32,
+    pub label: Option<String>,
+    pub route: bool,
+    pub short_range: bool,
+}
+/// Script blips and the GPS line, set each frame before `Menu::draw`.
+#[derive(Default)]
+pub struct MapOverlay {
+    pub blips: Vec<MapBlip>,
+    /// From the player to the route blip; empty without one.
+    pub route: Vec<[f32; 2]>,
+    pub route_color: Color32,
+}
+/// FiveM blip colour indices (`SetBlipColour`); unknown ones are white.
+pub fn blip_color(index: i64) -> Color32 {
+    match index {
+        1 | 6 | 59 => Color32::from_rgb(224, 50, 50),
+        2 | 25 | 69 => Color32::from_rgb(114, 204, 114),
+        3 | 26 | 38 => Color32::from_rgb(93, 182, 229),
+        5 | 46 | 66 => Color32::from_rgb(240, 200, 80),
+        7 | 27 | 83 => Color32::from_rgb(171, 104, 220),
+        8 | 48 => Color32::from_rgb(240, 120, 190),
+        17 | 47 | 81 => Color32::from_rgb(240, 145, 60),
+        _ => Color32::from_rgb(240, 240, 240),
+    }
+}
+/// Radar view radius in metres: wider the faster the car goes.
+fn radar_range(car_speed: Option<f32>, zoom: f32) -> f32 {
+    let metres = match car_speed {
+        Some(speed) => 260.0 + speed.abs().min(45.0) * 9.0,
+        None => 180.0,
+    };
+    metres / zoom.max(0.1)
+}
+/// The parts of a polyline (already in radar offsets) inside `radius`,
+/// cut into short pieces so a line leaving the circle stops at its edge.
+fn radar_line(points: &[Vec2], radius: f32) -> Vec<[Vec2; 2]> {
+    let mut pieces = Vec::new();
+    for pair in points.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let steps = ((b - a).length() / 6.0).ceil().clamp(1.0, 400.0) as usize;
+        for step in 0..steps {
+            let from = a + (b - a) * (step as f32 / steps as f32);
+            let to = a + (b - a) * ((step + 1) as f32 / steps as f32);
+            if from.length() <= radius && to.length() <= radius {
+                pieces.push([from, to]);
+            }
+        }
+    }
+    pieces
+}
+
 fn radar_offset(dx: f32, dy: f32, yaw: f32, scale: f32) -> Vec2 {
     let (sin_yaw, cos_yaw) = yaw.sin_cos();
     Vec2::new(
@@ -212,6 +268,9 @@ pub struct Menu {
     settings_controls: Vec<(Rect, Rect)>,
     pub graphics_device: String,
     pub graphics_resolution: String,
+    pub overlay: MapOverlay,
+    /// Eased radar radius in metres.
+    radar_range: f32,
 }
 
 impl Menu {
@@ -531,6 +590,8 @@ impl Menu {
             settings_controls: Vec::new(),
             graphics_device: String::new(),
             graphics_resolution: String::new(),
+            overlay: MapOverlay::default(),
+            radar_range: 0.0,
         }
     }
     pub fn submit_command(&mut self) {
@@ -769,7 +830,16 @@ impl Menu {
                         let painter = ui.painter();
                         let radius = side * 0.49;
                         let center = [coordinates[0], coordinates[1]];
-                        let map_scale = side / (2400.0 / self.settings.minimap_zoom);
+                        // Zoom out smoothly with speed, so the road ahead is
+                        // visible when driving and the streets close by on foot.
+                        let range = radar_range(car_speed, self.settings.minimap_zoom);
+                        let dt = ui.input(|input| input.stable_dt).min(0.1);
+                        self.radar_range = if self.radar_range > 0.0 {
+                            self.radar_range + (range - self.radar_range) * (1.0 - (-2.5 * dt).exp())
+                        } else {
+                            range
+                        };
+                        let map_scale = radius / self.radar_range;
                         painter.rect_filled(rect, 0.0, Color32::from_black_alpha(230));
                         let circle = (0..64)
                             .map(|index| {
@@ -780,38 +850,42 @@ impl Menu {
                         for tile in radar_tiles {
                             add_radar_tile(painter, *tile, rect, center, yaw, map_scale, &circle);
                         }
-                        painter.circle_stroke(rect.center(), radius, egui::Stroke::new(2.0, GOLD));
-                        let nearest = DESTINATIONS
-                            .iter()
-                            .min_by(|a, b| {
-                                let distance = |xy: [f32; 2]| {
-                                    (xy[0] - coordinates[0]).powi(2)
-                                        + (xy[1] - coordinates[1]).powi(2)
-                                };
-                                distance(a.1).total_cmp(&distance(b.1))
-                            })
-                            .map(|destination| destination.1)
-                            .unwrap_or([coordinates[0], coordinates[1]]);
-                        let map_scale = side / (2400.0 / self.settings.minimap_zoom);
+                        let to_radar = |xy: [f32; 2]| {
+                            radar_offset(xy[0] - center[0], xy[1] - center[1], yaw, map_scale)
+                        };
                         for (_, xy) in DESTINATIONS.iter() {
-                            let offset = radar_offset(
-                                xy[0] - coordinates[0],
-                                xy[1] - coordinates[1],
-                                yaw,
-                                map_scale,
-                            );
-                            if offset.length() < side * 0.43 {
+                            let offset = to_radar(*xy);
+                            if offset.length() < radius - 8.0 {
                                 painter.circle_filled(rect.center() + offset, 3.0, MUTED);
                             }
                         }
-                        let marker = radar_offset(
-                            nearest[0] - coordinates[0],
-                            nearest[1] - coordinates[1],
-                            yaw,
-                            map_scale,
-                        );
-                        if marker.length() < side * 0.40 {
-                            painter.circle_filled(rect.center() + marker, 5.0, GOLD);
+                        // GPS line: an outline, then the route colour.
+                        let route = self.overlay.route.iter().map(|xy| to_radar(*xy)).collect::<Vec<_>>();
+                        let pieces = radar_line(&route, radius - 2.0);
+                        for (width, color) in [(6.0, Color32::from_black_alpha(200)), (3.5, self.overlay.route_color)] {
+                            for [a, b] in &pieces {
+                                painter.line_segment(
+                                    [rect.center() + *a, rect.center() + *b],
+                                    egui::Stroke::new(width, color),
+                                );
+                            }
+                        }
+                        painter.circle_stroke(rect.center(), radius, egui::Stroke::new(2.0, GOLD));
+                        // Blips out of range sit on the edge, pointing the way.
+                        for blip in &self.overlay.blips {
+                            let mut offset = to_radar(blip.position);
+                            let edge = radius - 6.0;
+                            let outside = offset.length() > edge;
+                            if outside && blip.short_range {
+                                continue;
+                            }
+                            if outside {
+                                offset = offset.normalized() * edge;
+                            }
+                            let size = if blip.route { 6.5 } else { 5.0 } * if outside { 0.8 } else { 1.0 };
+                            let at = rect.center() + offset;
+                            painter.circle_filled(at, size + 1.5, Color32::BLACK);
+                            painter.circle_filled(at, size, blip.color);
                         }
                         painter.circle_stroke(
                             rect.center(),
@@ -958,6 +1032,16 @@ impl Menu {
                                 for tile in radar_tiles { add_radar_tile(p,*tile,map,[0.0,0.0],0.0,map.width()/6000.0,&clip); }
                                 if radar_tiles.is_empty() { p.text(map.center(),egui::Align2::CENTER_CENTER,"Original map unavailable",FontId::proportional(14.0*scale),MUTED); }
                                 for (index,(_,xy)) in DESTINATIONS.iter().enumerate(){let point=project(*xy);p.circle_filled(point,8.0*scale,GOLD);p.text(point,egui::Align2::CENTER_CENTER,(index+1).to_string(),FontId::proportional(11.0*scale),Color32::BLACK);}
+                                let route:Vec<Pos2>=self.overlay.route.iter().map(|xy|project(*xy)).collect();
+                                if route.len()>=2 {
+                                    p.add(egui::Shape::line(route.clone(),egui::Stroke::new(5.0*scale,Color32::from_black_alpha(200))));
+                                    p.add(egui::Shape::line(route,egui::Stroke::new(3.0*scale,self.overlay.route_color)));
+                                }
+                                for blip in &self.overlay.blips {
+                                    let point=project(blip.position);
+                                    p.circle_filled(point,7.0*scale,Color32::BLACK);p.circle_filled(point,5.5*scale,blip.color);
+                                    if let Some(label)=&blip.label { p.text(point+Vec2::new(10.0*scale,0.0),egui::Align2::LEFT_CENTER,label,FontId::proportional(13.0*scale),WHITE); }
+                                }
                                 p.circle_stroke(project([coordinates[0],coordinates[1]]),12.0*scale,egui::Stroke::new(2.0,WHITE));
                                 columns[1].label(RichText::new("Overview map • white ring marks your position").size(13.0).color(MUTED));
                             });
