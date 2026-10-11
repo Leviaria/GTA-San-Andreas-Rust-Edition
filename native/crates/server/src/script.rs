@@ -460,33 +460,35 @@ fn dependents(shared: &Shared, name: &str) -> Vec<String> {
 /// FiveM does: a dependent left running would keep stale exports and
 /// function references. Returns the dependents in the order they stopped.
 pub fn stop_tree(shared: &Shared, name: &str) -> Result<Vec<String>> {
-    fn collect(shared: &Shared, name: &str, order: &mut Vec<String>, depth: usize) {
+    /// (dependent, the resource it depends on), dependents of dependents first.
+    fn collect(shared: &Shared, name: &str, order: &mut Vec<(String, String)>, depth: usize) {
         if depth > 16 {
             return;
         }
         for dependent in dependents(shared, name) {
-            if !order.contains(&dependent) {
+            if !order.iter().any(|(d, _)| *d == dependent) {
                 collect(shared, &dependent, order, depth + 1);
-                if !order.contains(&dependent) {
-                    order.push(dependent);
+                if !order.iter().any(|(d, _)| *d == dependent) {
+                    order.push((dependent, name.to_string()));
                 }
             }
         }
     }
     let mut order = Vec::new();
     collect(shared, name, &mut order, 0);
-    for other in order.iter().chain(std::iter::once(&name.to_string())) {
+    for (other, _) in &order {
         check_stoppable(shared, other)?;
     }
-    for dependent in &order {
+    check_stoppable(shared, name)?;
+    for (dependent, parent) in &order {
         out(
             shared,
-            format!("{dependent} depends on {name}; stopping it too."),
+            format!("{dependent} depends on {parent}; stopping it too."),
         );
         stop_one(shared, dependent)?;
     }
     stop_one(shared, name)?;
-    Ok(order)
+    Ok(order.into_iter().map(|(d, _)| d).collect())
 }
 fn check_stoppable(shared: &Shared, name: &str) -> Result<()> {
     let state = shared.borrow();
