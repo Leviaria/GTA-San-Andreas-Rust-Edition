@@ -528,8 +528,10 @@ fn taxi_runs_are_started_checked_and_paid_by_the_server_once() {
         p[0].text().contains("Taxi: drive to")
     });
     drive(&mut server, &mut player, POINT, 85.0);
-    server.until(&mut [&mut player], "the fare", |_, p| cash(p[0]) == "$584");
-    assert!(notified(&player, "Paid $84"));
+    // Cash and the notification are separate messages, so wait for both.
+    server.until(&mut [&mut player], "the fare", |_, p| {
+        cash(p[0]) == "$584" && notified(p[0], "Paid $84")
+    });
     taxi_menu(&mut server, &mut player, "Take a dispatch");
     server.until(&mut [&mut player], "the cooldown", |_, p| {
         notified(p[0], "nothing for you yet")
