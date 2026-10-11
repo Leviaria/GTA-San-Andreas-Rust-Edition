@@ -10,6 +10,7 @@ mod chat;
 mod client_scripts;
 mod controller;
 mod culling;
+mod daycycle;
 mod gameplay_audio;
 mod gps;
 mod menu;
@@ -71,6 +72,8 @@ struct State {
     opaque: wgpu::RenderPipeline,
     blended: wgpu::RenderPipeline,
     shadows: shadow::Shadows,
+    pub(crate) daycycle: daycycle::DayCycle,
+    lighting: daycycle::Lighting,
     light_frustum: culling::Frustum,
     batches: Vec<GpuBatch>,
     position: Vec3,
@@ -313,7 +316,7 @@ impl State {
         });
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
-            size: 160,
+            size: 224,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -524,6 +527,8 @@ impl State {
             opaque,
             blended,
             shadows,
+            daycycle: daycycle::DayCycle::default(),
+            lighting: daycycle::DayCycle::default().lighting(12.0),
             light_frustum: culling::Frustum::default(),
             batches,
             position: if let Some(ref cut) = animation {
@@ -924,6 +929,10 @@ impl State {
                 .min(if self.driving { 0.25 } else { 0.05 })
         };
         self.last = now;
+        if self.menu.settings.fixed_hour.is_none() {
+            // One game minute per real second, as in San Andreas.
+            self.daycycle.advance(dt);
+        }
         let stream_started = Instant::now();
         self.stream_world();
         self.metrics.stream_ms = stream_started.elapsed().as_secs_f64() * 1000.;
@@ -1336,12 +1345,34 @@ impl State {
                 0.0,
             ]),
         );
-        let light = shadow::light_matrix(self.position);
+        let hour = self
+            .menu
+            .settings
+            .fixed_hour
+            .map_or(self.daycycle.minutes / 60.0, f32::from);
+        let mut lighting = self.daycycle.lighting(hour);
+        if self.interior != 0 {
+            // Interiors keep their own baked lighting at every hour.
+            lighting.ambient = Vec3::ONE;
+            lighting.daylight = 0.0;
+        }
+        self.lighting = lighting;
+        let light = shadow::light_matrix(self.position, lighting.sun);
         self.light_frustum = culling::Frustum::new(light);
         self.queue.write_buffer(
             &self.camera,
             96,
             bytemuck::cast_slice(&light.to_cols_array()),
+        );
+        self.queue.write_buffer(
+            &self.camera,
+            160,
+            bytemuck::cast_slice(&[
+                lighting.sun.extend(lighting.daylight).to_array(),
+                lighting.sun_color.extend(0.0).to_array(),
+                lighting.ambient.extend(0.0).to_array(),
+                lighting.sky.extend(0.0).to_array(),
+            ]),
         );
     }
     /// World batches inside `frustum`, followed by every car and ped.
@@ -1763,6 +1794,10 @@ impl State {
                     });
             }
             self.update_map_overlay(coordinates);
+            self.menu.clock = match self.menu.settings.fixed_hour {
+                Some(hour) => (u32::from(hour), 0),
+                None => self.daycycle.clock(),
+            };
             action = self.menu.draw(
                 ui.ctx(),
                 coordinates,
@@ -1839,9 +1874,9 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.36,
-                            g: 0.55,
-                            b: 0.72,
+                            r: self.lighting.sky.x as f64,
+                            g: self.lighting.sky.y as f64,
+                            b: self.lighting.sky.z as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -2200,6 +2235,7 @@ impl ApplicationHandler for App {
         )) {
             Ok(mut state) => {
                 state.roads = roads;
+                state.daycycle = daycycle::DayCycle::load(&self.game_dir);
                 state.persist_settings = !self.smoke;
                 if self.smoke_graphics {
                     state.menu.open_graphics();

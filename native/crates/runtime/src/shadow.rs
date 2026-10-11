@@ -7,8 +7,6 @@ pub const SIZE: u32 = 2048;
 const RADIUS: f32 = 90.0;
 const DEPTH: f32 = 1000.0;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-/// Must match `SUN` in shader.wgsl.
-pub const SUN: Vec3 = Vec3::new(-0.42, 0.80, 0.43);
 
 pub struct Shadows {
     pub view: wgpu::TextureView,
@@ -134,10 +132,10 @@ impl Shadows {
     }
 }
 
-/// Light view-projection centred on `focus`, snapped to whole shadow texels so
+/// Light view-projection looking along `sun` and centred on `focus`, snapped to whole shadow texels so
 /// shadow edges do not crawl as the player moves.
-pub fn light_matrix(focus: Vec3) -> Mat4 {
-    let sun = SUN.normalize();
+pub fn light_matrix(focus: Vec3, sun: Vec3) -> Mat4 {
+    let sun = sun.normalize();
     let view = Mat4::look_at_rh(focus + sun * (DEPTH * 0.5), focus, Vec3::Y);
     let projection = Mat4::orthographic_rh(-RADIUS, RADIUS, -RADIUS, RADIUS, 1.0, DEPTH);
     let texel = 2.0 * RADIUS / SIZE as f32;
@@ -309,8 +307,11 @@ pub(super) async fn probe(backends: wgpu::Backends) -> anyhow::Result<(f32, f32)
     let camera_matrix = Mat4::orthographic_rh(-40.0, 40.0, -40.0, 40.0, 1.0, 100.0)
         * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::NEG_Z);
     let mut uniforms = camera_matrix.to_cols_array().to_vec();
+    let sun = Vec3::new(-0.42, 0.80, 0.43).normalize();
     uniforms.extend([eye.x, eye.y, eye.z, 0.0, 0.0, 1.0, 1.0, 0.0]);
-    uniforms.extend(light_matrix(Vec3::ZERO).to_cols_array());
+    uniforms.extend(light_matrix(Vec3::ZERO, sun).to_cols_array());
+    uniforms.extend([sun.x, sun.y, sun.z, 1.0]);
+    uniforms.extend([1.0, 0.95, 0.86, 0.0, 1.0, 1.0, 1.0, 0.0, 0.5, 0.6, 0.7, 0.0]);
     let camera = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: None,
         contents: bytemuck::cast_slice(&uniforms),
@@ -444,14 +445,16 @@ pub(super) async fn probe(backends: wgpu::Backends) -> anyhow::Result<(f32, f32)
 #[cfg(test)]
 mod tests {
     use super::*;
+    const SUN: Vec3 = Vec3::new(-0.42, 0.80, 0.43);
     #[test]
     fn focus_lands_near_the_centre_of_the_map() {
         let focus = Vec3::new(2495.3, 13.7, -1668.9);
-        let clip = light_matrix(focus) * focus.extend(1.0);
+        let clip = light_matrix(focus, SUN) * focus.extend(1.0);
         assert!(clip.x.abs() < 2.0 / SIZE as f32 * 1.01);
         assert!(clip.y.abs() < 2.0 / SIZE as f32 * 1.01);
         assert!((0.0..1.0).contains(&clip.z));
-        let edge = light_matrix(focus) * (focus + Vec3::new(RADIUS * 0.9, 0.0, 0.0)).extend(1.0);
+        let edge =
+            light_matrix(focus, SUN) * (focus + Vec3::new(RADIUS * 0.9, 0.0, 0.0)).extend(1.0);
         assert!(edge.x.abs() <= 1.0 && edge.y.abs() <= 1.0);
     }
     #[test]

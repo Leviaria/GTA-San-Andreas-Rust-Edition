@@ -50,6 +50,8 @@ pub struct Settings {
     pub atmospheric_fog: bool,
     pub sun_lighting: f32,
     pub sun_shadows: bool,
+    /// Fixed hour of day, or `None` for the running day/night cycle.
+    pub fixed_hour: Option<u8>,
     pub fsr1: bool,
     pub renderer: Renderer,
     pub fps_limit: u32,
@@ -83,6 +85,7 @@ impl Default for Settings {
             atmospheric_fog: true,
             sun_lighting: 0.35,
             sun_shadows: true,
+            fixed_hour: None,
             fsr1: true,
             renderer: Renderer::Auto,
             fps_limit: 0,
@@ -99,6 +102,9 @@ impl Settings {
         self.render_scale = self.render_scale.clamp(50, 150);
         if ![1, 2, 4, 8, 16].contains(&self.texture_anisotropy) {
             self.texture_anisotropy = defaults.texture_anisotropy;
+        }
+        if self.fixed_hour.is_some_and(|hour| hour > 23) {
+            self.fixed_hour = None;
         }
         if ![0, 30, 60, 90, 120, 144, 165, 240].contains(&self.fps_limit) {
             self.fps_limit = 0;

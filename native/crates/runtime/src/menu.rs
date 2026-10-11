@@ -323,6 +323,8 @@ pub struct Menu {
     pub server_list: Vec<sa_net::relay::Listing>,
     pub browser_status: String,
     pub network_status: String,
+    /// Game clock shown in the HUD, hours and minutes.
+    pub clock: (u32, u32),
     pub ride_status: String,
     pub network_players: Vec<String>,
     pub network_active: bool,
@@ -384,6 +386,7 @@ impl Menu {
                 ("Atmospheric haze", on(s.atmospheric_fog), "Distant outdoor scenery fades into the horizon. Interiors stay clear."),
                 ("Sun lighting", format!("{:.0}%", s.sun_lighting * 100.0), "Shades outdoor surfaces by how they face the sun, on top of the original baked lighting. Zero keeps the original look."),
                 ("Sun shadows", on(s.sun_shadows), "Buildings, trees, cars and people cast shadows near you outdoors. Renders the nearby scene a second time; off in the Performance preset."),
+                ("Time of day", s.fixed_hour.map_or("Day/night cycle".into(), |hour| format!("{hour:02}:00")), "The cycle runs one game minute per real second. A fixed hour stops the clock."),
                 ("Texture filtering", if s.texture_anisotropy == 1 { "Trilinear".into() } else { format!("{}x anisotropic", s.texture_anisotropy) }, "Keeps road and building textures clearer at shallow angles. Mipmaps reduce distant texture shimmer. Requires restart."),
             ],
             SettingsTab::Gameplay => vec![
@@ -470,6 +473,16 @@ impl Menu {
             (SettingsTab::Graphics, 11) => s.sun_lighting += delta * 0.05,
             (SettingsTab::Graphics, 12) => s.sun_shadows = !s.sun_shadows,
             (SettingsTab::Graphics, 13) => {
+                // Cycle, then each hour; None sits between 23:00 and 00:00.
+                s.fixed_hour = match (s.fixed_hour, left) {
+                    (None, false) => Some(0),
+                    (None, true) => Some(23),
+                    (Some(23), false) | (Some(0), true) => None,
+                    (Some(hour), false) => Some(hour + 1),
+                    (Some(hour), true) => Some(hour - 1),
+                };
+            }
+            (SettingsTab::Graphics, 14) => {
                 let values = [1, 2, 4, 8, 16];
                 let index = values
                     .iter()
@@ -653,6 +666,7 @@ impl Menu {
             server_list: Vec::new(),
             browser_status: String::new(),
             network_status: "Offline".into(),
+            clock: (12, 0),
             ride_status: String::new(),
             network_players: Vec::new(),
             network_active: false,
@@ -976,6 +990,20 @@ impl Menu {
                     });
             }
             if self.settings.show_hud {
+                egui::Area::new("freeroam-clock".into())
+                    .anchor(
+                        egui::Align2::RIGHT_TOP,
+                        Vec2::new(-28.0, if self.network_active { 130.0 } else { 22.0 }),
+                    )
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        ui.label(
+                            RichText::new(format!("{:02}:{:02}", self.clock.0, self.clock.1))
+                                .size(30.0 * scale)
+                                .color(WHITE)
+                                .strong(),
+                        );
+                    });
                 egui::Area::new("freeroam-hud".into())
                     .fixed_pos(Pos2::new(
                         28.0,

@@ -29,6 +29,15 @@ live and persist, except renderer and texture-filter changes which require resta
   out at the border. It renders nearby geometry a second time. Interiors skip it.
   `--probe-shadows --renderer vulkan` (also a unit test) renders an owned scene through the real
   shaders (skipped without a GPU adapter; lavapipe works).
+- Day/night cycle: one game minute per real second, starting at 12:00, with a
+  clock in the HUD. Graphics → Time of day can fix any hour instead. Sky,
+  haze, sun colour and night darkening come from the first weather block
+  (extra sunny Los Santos) of the player's own `data/timecyc.dat`, with
+  built-in colours if it cannot be read. The sun rises in the east at 06:00
+  and sets in the west at 20:00; a dimmer moon lights the night, and shadows
+  fade around sunrise and sunset. Night darkening scales the day-baked prelit
+  colours; SA's separate night vertex colours, lit windows and street lights
+  are not used yet. Weather and multiplayer time sync are not implemented.
 - FXAA, adjustable sharpening, a small bright-pass bloom filter, exposure,
   saturation, vignette and outdoor distance haze. Fog is disabled indoors.
 - A linear RGBA16F intermediate scene target and filmic display mapping.
