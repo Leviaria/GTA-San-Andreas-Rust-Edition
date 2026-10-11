@@ -174,7 +174,9 @@ your car, not passenger transport.
 2. Get in a car and pick **Take a dispatch**. The server picks a point in Los
    Santos 250 to 3000 m away and the fare: $40 plus $0.12 per metre in a
    straight line, at most $450.
-3. The side of the screen shows the point, the distance and the direction.
+3. A yellow blip marks the point on the radar and the pause map, and a
+   yellow GPS line shows the way along the roads. The side of the screen
+   shows the distance and the direction.
 4. Stop within 12 m of the point in a car. The server sees it within half a
    second and pays the fare into your cash once. The next dispatch is
    available 20 seconds later.
@@ -200,7 +202,7 @@ All numbers and the dispatch points are in `sarebox_taxi/config.lua`.
    `Taxi - Recruit`.
 3. Get in your car (pick a car in the game menu, then **F** to get in),
    press **J** and pick **Take a dispatch**.
-4. Drive to the point shown at the side of the screen. Within 12 m, stop:
+4. Follow the yellow GPS line to the yellow blip. Within 12 m, stop:
    "Arrived at ... Paid $..." and the cash on the HUD goes up by the fare.
 5. Try to break it: take a dispatch and teleport there with `/goto` from an
    admin, or press **J** and cancel, or go off duty in **F1**: no money.

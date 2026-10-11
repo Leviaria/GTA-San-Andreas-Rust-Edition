@@ -1,7 +1,7 @@
 //! The server's client scripts: downloads bundles, feeds the sandbox what
 //! scripts may read each frame and applies what they asked for.
 use super::{
-    menu::{blip_color, MapBlip},
+    menu::{blip_color, MapBlip, WAYPOINT},
     State, ORIGIN,
 };
 use sa_lua::client::{Output, PlayerView, View};
@@ -78,19 +78,30 @@ impl State {
             self.release_script_cursor();
         }
     }
-    /// Script blips and the GPS line to the route blip, for radar and map.
+    /// Script blips and the GPS line, for radar and map. A script's route
+    /// blip wins over the player's own waypoint, which clears on arrival.
     pub(super) fn update_map_overlay(&mut self, coordinates: [f32; 3]) {
         let at = [coordinates[0], coordinates[1]];
+        if self
+            .menu
+            .waypoint
+            .is_some_and(|w| (w[0] - at[0]).hypot(w[1] - at[1]) < 25.0)
+        {
+            self.menu.waypoint = None;
+        }
         let blips = self.scripts.blips();
         let route = blips.iter().rev().find(|blip| blip.route);
-        self.gps.update(
-            self.roads.as_ref(),
-            at,
-            route.map(|blip| [blip.position[0], blip.position[1]]),
-        );
+        let (target, color) = match route {
+            Some(blip) => (
+                Some([blip.position[0], blip.position[1]]),
+                blip_color(blip.colour),
+            ),
+            None => (self.menu.waypoint, WAYPOINT),
+        };
+        self.gps.update(self.roads.as_ref(), at, target);
         let overlay = &mut self.menu.overlay;
         overlay.route = self.gps.line(at);
-        overlay.route_color = route.map_or(Default::default(), |blip| blip_color(blip.colour));
+        overlay.route_color = color;
         overlay.blips = blips
             .iter()
             .map(|blip| MapBlip {

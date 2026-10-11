@@ -1412,49 +1412,60 @@ fn create_state(
             }
         }
     }
-    func!(g, "AddBlipForCoord", shared, name, deadline, |_lua,
-                                                         (
-        x,
-        y,
-        z,
-    ): (
-        f32,
-        f32,
-        Option<f32>
-    )| {
-        let z = z.unwrap_or(0.0);
-        let mut state = shared.borrow_mut();
-        if ![x, y, z].iter().all(|v| v.is_finite()) || state.blips.len() >= MAX_BLIPS {
-            return Ok(0);
+    func!(
+        g,
+        "AddBlipForCoord",
+        shared,
+        name,
+        deadline,
+        |_lua, (x, y, z): (f32, f32, Option<f32>)| {
+            let z = z.unwrap_or(0.0);
+            let mut state = shared.borrow_mut();
+            if ![x, y, z].iter().all(|v| v.is_finite()) || state.blips.len() >= MAX_BLIPS {
+                return Ok(0);
+            }
+            state.next_blip += 1;
+            let handle = state.next_blip;
+            let blip = Blip {
+                handle,
+                position: [x, y, z],
+                colour: 0,
+                sprite: 1,
+                label: None,
+                route: false,
+                short_range: false,
+            };
+            state.blips.insert(handle, (name.clone(), blip));
+            Ok(handle)
         }
-        state.next_blip += 1;
-        let handle = state.next_blip;
-        let blip = Blip {
-            handle,
-            position: [x, y, z],
-            colour: 0,
-            sprite: 1,
-            label: None,
-            route: false,
-            short_range: false,
-        };
-        state.blips.insert(handle, (name.clone(), blip));
-        Ok(handle)
-    });
-    func!(g, "RemoveBlip", shared, name, deadline, |_lua, handle: i64| {
-        let mut state = shared.borrow_mut();
-        if state.blips.get(&handle).is_some_and(|(owner, _)| owner == name) {
-            state.blips.remove(&handle);
+    );
+    func!(
+        g,
+        "RemoveBlip",
+        shared,
+        name,
+        deadline,
+        |_lua, handle: i64| {
+            let mut state = shared.borrow_mut();
+            if state
+                .blips
+                .get(&handle)
+                .is_some_and(|(owner, _)| owner == name)
+            {
+                state.blips.remove(&handle);
+            }
+            Ok(())
         }
-        Ok(())
-    });
+    );
     func!(
         g,
         "DoesBlipExist",
         shared,
         name,
         deadline,
-        |_lua, handle: Option<i64>| Ok(handle.is_some_and(|h| shared.borrow().blips.contains_key(&h)))
+        |_lua, handle: Option<i64>| Ok(
+            handle.is_some_and(|h| shared.borrow().blips.contains_key(&h))
+        )
     );
     func!(g, "SetBlipCoords", shared, name, deadline, |_lua,
                                                        (
@@ -1474,15 +1485,22 @@ fn create_state(
         }
         Ok(())
     });
-    func!(g, "GetBlipCoords", shared, name, deadline, |lua, handle: i64| {
-        let [x, y, z] = shared
-            .borrow()
-            .blips
-            .get(&handle)
-            .map_or([0.0; 3], |(_, b)| b.position);
-        let make: Function = lua.globals().get("vector3")?;
-        make.call::<Value>((x, y, z))
-    });
+    func!(
+        g,
+        "GetBlipCoords",
+        shared,
+        name,
+        deadline,
+        |lua, handle: i64| {
+            let [x, y, z] = shared
+                .borrow()
+                .blips
+                .get(&handle)
+                .map_or([0.0; 3], |(_, b)| b.position);
+            let make: Function = lua.globals().get("vector3")?;
+            make.call::<Value>((x, y, z))
+        }
+    );
     func!(g, "SetBlipColour", shared, name, deadline, |_lua,
                                                        (
         handle,
@@ -1516,17 +1534,17 @@ fn create_state(
         with_blip(shared, name, handle, |b| b.route = enabled);
         Ok(())
     });
-    func!(g, "SetBlipAsShortRange", shared, name, deadline, |_lua,
-                                                             (
-        handle,
-        enabled,
-    ): (
-        i64,
-        bool
-    )| {
-        with_blip(shared, name, handle, |b| b.short_range = enabled);
-        Ok(())
-    });
+    func!(
+        g,
+        "SetBlipAsShortRange",
+        shared,
+        name,
+        deadline,
+        |_lua, (handle, enabled): (i64, bool)| {
+            with_blip(shared, name, handle, |b| b.short_range = enabled);
+            Ok(())
+        }
+    );
     func!(
         g,
         "BeginTextCommandSetBlipName",
@@ -1538,14 +1556,24 @@ fn create_state(
             Ok(())
         }
     );
-    for component in ["AddTextComponentString", "AddTextComponentSubstringPlayerName"] {
-        func!(g, component, shared, name, deadline, |_lua, text: String| {
-            let mut state = shared.borrow_mut();
-            if state.blip_text.len() + text.len() <= 128 {
-                state.blip_text.push_str(&text);
+    for component in [
+        "AddTextComponentString",
+        "AddTextComponentSubstringPlayerName",
+    ] {
+        func!(
+            g,
+            component,
+            shared,
+            name,
+            deadline,
+            |_lua, text: String| {
+                let mut state = shared.borrow_mut();
+                if state.blip_text.len() + text.len() <= 128 {
+                    state.blip_text.push_str(&text);
+                }
+                Ok(())
             }
-            Ok(())
-        });
+        );
     }
     func!(
         g,
@@ -1923,5 +1951,4 @@ mod tests {
         assert!(host.command("drop"));
         assert!(host.blips().is_empty());
     }
-
 }

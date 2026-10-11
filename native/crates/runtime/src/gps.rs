@@ -60,8 +60,11 @@ impl Gps {
         }
         let nearest = (0..ahead - 1)
             .min_by(|&a, &b| {
-                to_segment(at, self.path[a], self.path[a + 1])
-                    .total_cmp(&to_segment(at, self.path[b], self.path[b + 1]))
+                to_segment(at, self.path[a], self.path[a + 1]).total_cmp(&to_segment(
+                    at,
+                    self.path[b],
+                    self.path[b + 1],
+                ))
             })
             .unwrap_or(0);
         self.path.drain(..nearest);
@@ -74,7 +77,10 @@ impl Gps {
         }
     }
     fn off_route(&self, at: [f32; 2]) -> bool {
-        let first = self.path.first().map_or(f32::INFINITY, |&p| distance(at, p));
+        let first = self
+            .path
+            .first()
+            .map_or(f32::INFINITY, |&p| distance(at, p));
         let along = self
             .path
             .windows(2)

@@ -103,10 +103,17 @@ feilmelding vises i menyen.
 - Innstillinger for synsfelt, mus, fullskjerm, VSync, HUD, radar/minikart,
   speedometer, kjøreegenskaper og flyfart lagres i
   `%LOCALAPPDATA%/SAFreeroam/settings.json`. Menyer stopper spillerbevegelsen.
-- Radar/minikartet bruker de originale radarflisene fra installasjonens
-  `models/radar.txd`, plassert etter San Andreas-verdenskoordinater. Det roterer
-  med spillerens retning, har justerbar zoom og viser reisemålsmarkører. Hvis
-  originalfilen mangler, vises ikke et oppdiktet kart. Speedometeret
+- Radar/minikartet bruker de originale radarflisene (`radar00.txd` til
+  `radar143.txd` i `gta3.img`), plassert etter San Andreas-verdenskoordinater.
+  Som i GTA V er det et rektangel nede til venstre som roterer med kameraet,
+  har spilleren lavt i bildet og zoomer ut med farten. Blips utenfor
+  rekkevidde ligger på kanten. Hvis originalfilen mangler, vises ikke et
+  oppdiktet kart.
+- Pausekartet (M) er som i GTA V: dra eller WASD for å flytte, scroll eller
+  PgUp/PgDn for å zoome, legend til høyre, reisemål til venstre. Høyreklikk
+  setter og fjerner et waypoint, C finner deg igjen og Backspace fjerner
+  waypointet. GPS-linjen følger bilveiene fra spillets `nodes*.dat` og finner
+  ny vei etter feil sving; uten dem er den en rett linje. Speedometeret
   vises når spilleren kjører bil. Begge kan slås av hver for seg i innstillingene.
 - Tap av vindusfokus åpner pausemenyen. Kartmenyen støtter også tallene 1–9.
 - `--smoke-menus` rendrer menysidene og kan lagre renderbilder.

@@ -66,10 +66,7 @@ fn parse_area(data: &[u8]) -> Result<Area> {
             (u16at(data, at), u16at(data, at + 2))
         })
         .collect();
-    Ok(Area {
-        nodes: cars,
-        links,
-    })
+    Ok(Area { nodes: cars, links })
 }
 
 fn build(areas: &[Option<Area>]) -> RoadGraph {

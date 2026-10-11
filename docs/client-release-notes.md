@@ -22,3 +22,9 @@ Copy `server-data/resources/[sarebox]/` from the new server ZIP over yours,
 then re-add admins with their new license (`/id`). Old characters move to the
 new licenses with `sarebox_migrate`; see docs/sarebox.md. Players need this
 client version to keep a saved character.
+
+Map and radar work like GTA V: the radar is a rectangle in the bottom-left
+corner that zooms out the faster you drive and keeps you low, so more of the
+road ahead shows. The pause map (M) can be dragged and zoomed, has a legend,
+and right-click places a waypoint with a GPS route along the roads. Server
+scripts can place blips with GPS routes; the SARE Box taxi job uses them.
