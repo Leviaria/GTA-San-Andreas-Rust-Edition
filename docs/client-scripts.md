@@ -84,7 +84,11 @@ UI.hideTextUI()
 ```
 
 `UI.inputDialog` and `UI.progressBar` wait for the player, so call them from a
-thread, a command or a menu option. Options can use `onSelect`, `event`,
+thread, a command or a menu option. Text UI belongs to the resource that shows
+it: several resources can show text at once (one block each), and
+`UI.hideTextUI` and `UI.hideContext` only affect the calling resource's own
+text and menu. When a resource stops or restarts, its menu, dialog, progress
+bar and text disappear with it. Options can use `onSelect`, `event`,
 `serverEvent`, `args` and `menu` (opens another registered menu). Menus and
 dialogs free the mouse while open; Esc closes them.
 

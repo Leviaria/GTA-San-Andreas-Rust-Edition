@@ -45,7 +45,7 @@ NUI kjører ikke.
 | CfxLua-bibliotek: `table.clone/type/wipe/create`, `string.strsplit/strjoin/strtrim`, `io.readdir` | ox_lib | **Støttet** (nytt) |
 | `debug`-biblioteket | ox_lib (`debug.getinfo`) | **Støttet** (nytt) |
 | `playerConnecting` med `deferrals` og `setKickReason` | qbx_core | **Delvis** (nytt): spilleren er allerede koblet til, avvisning kaster spilleren ut |
-| `GetPlayerIdentifierByType`, `GetNumPlayerIdentifiers`, `GetPlayerIdentifier` | qbx_core | **Delvis** (nytt): `license:<hex>` (stabil per server, ikke signert) og `sare:<id>`; `discord`, `fivem` m.fl. gir `nil` |
+| `GetPlayerIdentifierByType`, `GetNumPlayerIdentifiers`, `GetPlayerIdentifier` | qbx_core | **Delvis**: `license:<hex>` (signert, stabil per server), `sare:<id>` og `legacy:<hex>` (gammel usignert license, bare som krav ved migrering); `discord`, `fivem` m.fl. gir `nil` |
 | Resource-KVP (`SetResourceKvp*`, `GetResourceKvp*`, `StartFindKvp`) | ox_lib, qbx_core | **Støttet** (nytt): lagres i `kvp/<ressurs>.json` |
 | ACL med `identifier.license:...` | txAdmin-oppsett, Qbox-admin | **Støttet** (nytt) |
 | `GetConvarBool` | ox_lib | **Støttet** (nytt) |
@@ -70,9 +70,10 @@ NUI kjører ikke.
    `transaction`, `prepare`) mot MySQL/MariaDB, slik at `@oxmysql/lib/MySQL.lua`
    fungerer uendret. I tillegg `PerformHttpRequest`, resource-KVP og
    `AddConvarChangeListener`.
-4. **Identitet (delvis ferdig):** `license:` fra en nøkkel hos spilleren,
-   saltet per server. Gjenstår: signatur, slik at en server ikke kan låne en
-   annen servers license, og deferrals før spilleren slippes inn.
+4. **Identitet (ferdig for serveren):** `license:` er spillerens Ed25519-nøkkel
+   for akkurat denne serveren, sjekket med signert challenge-response på hver
+   tilkobling (se [SARE Box](sarebox.md#player-identity)). Gjenstår: kryptert
+   transport, og deferrals før spilleren slippes inn.
 5. **Serverentiteter:** biler, peds og objekter som serveren eier, routing
    buckets og replikerte state bags.
 6. **Klient-Lua og UI (delvis ferdig):** sandkasse, nedlasting med SHA-256,
@@ -85,8 +86,10 @@ NUI kjører ikke.
 ## SARE Box
 
 SARE Box er SAREs eget rammeverk i Qbox-form (spillerobjekter, penger, jobber,
-lønn, adminmeny, lagring per license). Det er ikke Qbox, men viser at et
-rammeverk med samme oppbygning kjører på SARE i dag. Se [SARE Box](sarebox.md).
+lønn, adminmeny, taxijobb, lagring per signert license). Det er ikke Qbox:
+Qbox-ressurser kjører ikke på SARE Box, og SARE Box-ressurser er skrevet mot
+SAREs eget API (`exports.sarebox:GetCoreObject()`). Det viser at et rammeverk
+med samme oppbygning kjører på SARE i dag. Se [SARE Box](sarebox.md).
 
 ## Bygge et rammeverk på SARE nå
 
