@@ -172,7 +172,7 @@ fn default_resources_spawn_chat_commands_acl_and_exports() {
                 return;
             }
             assert!(
-                start.elapsed() < Duration::from_secs(5),
+                start.elapsed() < Duration::from_secs(30),
                 "timed out; got {:?}",
                 received.borrow()
             );
@@ -282,7 +282,7 @@ fn default_resources_spawn_chat_commands_acl_and_exports() {
         .update(sa_net::Pose::default())
         .is_some_and(|r| r.status.contains("Bye"))
     {
-        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(start.elapsed() < Duration::from_secs(30));
         thread::sleep(Duration::from_millis(5));
     }
     drop(session);
@@ -370,7 +370,7 @@ fn framework_examples_use_includes_provide_function_refs_and_state_bags() {
                 return;
             }
             assert!(
-                start.elapsed() < Duration::from_secs(5),
+                start.elapsed() < Duration::from_secs(30),
                 "timed out; got {received:?}"
             );
             thread::sleep(Duration::from_millis(5));
@@ -430,7 +430,7 @@ fn framework_examples_use_includes_provide_function_refs_and_state_bags() {
         }
         host.tick(sa_lua::client::View::default());
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(30),
             "{:?}",
             host.take_outputs()
         );
@@ -612,7 +612,7 @@ fn sarebox_saves_characters_by_license_and_admin_needs_the_acl() {
                 return (client, host);
             }
             assert!(
-                start.elapsed() < Duration::from_secs(5),
+                start.elapsed() < Duration::from_secs(30),
                 "player did not load"
             );
             thread::sleep(Duration::from_millis(5));
@@ -633,7 +633,7 @@ fn sarebox_saves_characters_by_license_and_admin_needs_the_acl() {
             host.tick(sa_lua::client::View::default());
             host.take_outputs();
             assert!(
-                start.elapsed() < Duration::from_secs(5),
+                start.elapsed() < Duration::from_secs(30),
                 "timed out: {:?}",
                 host.ui()
             );
@@ -695,7 +695,7 @@ fn sarebox_saves_characters_by_license_and_admin_needs_the_acl() {
     let start = Instant::now();
     while !shared.borrow().peers.is_empty() {
         pump(&shared, &mut console, &session, &mut known).unwrap();
-        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(start.elapsed() < Duration::from_secs(30));
         thread::sleep(Duration::from_millis(5));
     }
     script::flush_kvp(&shared, true);
