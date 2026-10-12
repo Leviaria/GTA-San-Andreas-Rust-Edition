@@ -18,7 +18,29 @@ pub struct GameplaySounds {
     sedan: EngineSounds,
     sports: EngineSounds,
     footsteps: Vec<SoundEffect>,
+    /// The generic weapon bank, when the install has it.
+    weapons: Vec<SoundEffect>,
 }
+
+/// The weapon bank in GENRL. Modding tools list it as `bank_137`, counting
+/// from one, the way they list the footsteps (bank 0 here) as `bank_001`.
+const WEAPON_BANK: usize = 136;
+
+/// Slot of the firing sound for a weapon.dat animation group, as modders
+/// have catalogued the bank (their `sound_001` is slot 0 here).
+fn gunshot_slot(group: &str) -> usize {
+    match group {
+        "uzi" | "tec" => 0,
+        "ak47" | "m4" | "rifle" | "sniper" => 3,
+        "mp5" => 17,
+        "shotgun" | "buddy" | "sawnoff" | "spas" => 21,
+        "silenced" => 24,
+        "python" | "deagle" => 26,
+        _ => 6,
+    }
+}
+/// Slot of a reload click.
+const RELOAD_SLOT: usize = 31;
 
 impl GameplaySounds {
     pub fn load(game: &Path) -> Result<Self> {
@@ -35,7 +57,15 @@ impl GameplaySounds {
         };
         let feet = archive.read_bank(0)?;
         ensure!(feet.len() >= 6, "generic footsteps bank is incomplete");
+        // Gun sounds are optional: a modded or trimmed install still plays.
+        let weapons = archive
+            .read_bank(WEAPON_BANK)
+            .ok()
+            .filter(|bank| bank.len() > RELOAD_SLOT)
+            .map(|bank| bank.iter().map(SoundEffect::from_pcm).collect())
+            .unwrap_or_default();
         Ok(Self {
+            weapons,
             sedan: engines(86)?,
             sports: engines(37)?,
             // Generic/concrete footsteps are slots 1..=5; slot 0 is not a step.
@@ -55,6 +85,15 @@ impl GameplaySounds {
             EngineKind::Sedan => &self.sedan,
             EngineKind::Sports => &self.sports,
         }
+    }
+
+    /// The firing sound for a gun's animation group, if the bank loaded.
+    pub fn gunshot(&self, group: &str) -> Option<&SoundEffect> {
+        self.weapons.get(gunshot_slot(group))
+    }
+
+    pub fn reload(&self) -> Option<&SoundEffect> {
+        self.weapons.get(RELOAD_SLOT)
     }
 
     pub fn footstep(&self, index: usize) -> &SoundEffect {
@@ -97,5 +136,19 @@ mod tests {
         assert!(loop_sample(&pcm).is_err());
         pcm.samples.clear();
         assert!(loop_sample(&pcm).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_gun_group_has_its_own_shot() {
+        assert_eq!(gunshot_slot("colt45"), 6);
+        assert_eq!(gunshot_slot("python"), 26);
+        assert_eq!(gunshot_slot("ak47"), gunshot_slot("m4"));
+        assert_ne!(gunshot_slot("shotgun"), gunshot_slot("uzi"));
+        assert!(RELOAD_SLOT > gunshot_slot("python"));
     }
 }
