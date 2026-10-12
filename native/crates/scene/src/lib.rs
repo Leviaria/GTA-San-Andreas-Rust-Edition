@@ -1,5 +1,6 @@
 //! Manifest-ordered SA world placement and small bounded scene assembly.
 pub mod collision;
+pub mod lights;
 mod mods;
 pub use mods::{share_resource_folders, share_resources};
 pub mod ped;
@@ -786,6 +787,9 @@ impl WorldLoader {
                 add_model(&mut fallback, &models[&dff], r, origin, &def.txd)?;
             }
             triangles += add_model(&mut batches, &models[&dff], r, origin, &def.txd)?;
+            if !is_lod {
+                lights::add(&mut batches, &models[&dff], r, origin);
+            }
             if !is_lod && self.roadsign_font.is_some() && sign_models.insert(dff.clone()) {
                 triangles += roadsign::add(&mut batches, &models[&dff], origin);
             }
@@ -811,6 +815,11 @@ impl WorldLoader {
             },
         );
         let mut fallback_textures = 0;
+        for key in [lights::CORONA_KEY, lights::POOL_KEY] {
+            if batches.contains_key(key) {
+                textures.insert(key.into(), textures["runtime:white"].clone());
+            }
+        }
         if batches.contains_key(roadsign::KEY) {
             textures.insert(
                 roadsign::KEY.into(),
