@@ -130,6 +130,25 @@ impl RoadGraph {
         ensure!(!graph.nodes.is_empty(), "no car paths in gta3.img");
         Ok(graph)
     }
+    /// A graph from explicit nodes and one-way links, for tests.
+    pub fn from_parts(nodes: Vec<[f32; 3]>, links: Vec<Vec<u32>>) -> Self {
+        assert_eq!(nodes.len(), links.len());
+        Self { nodes, links }
+    }
+    /// A node's San Andreas position (X east, Y north, Z up).
+    pub fn position(&self, node: u32) -> [f32; 3] {
+        self.nodes[node as usize]
+    }
+    pub fn neighbours(&self, node: u32) -> &[u32] {
+        &self.links[node as usize]
+    }
+    /// Connected nodes between `near` and `far` metres (flat distance) from `at`.
+    pub fn nodes_between(&self, at: [f32; 2], near: f32, far: f32) -> Vec<u32> {
+        (0..self.nodes.len() as u32)
+            .filter(|&n| !self.links[n as usize].is_empty())
+            .filter(|&n| (near..far).contains(&self.flat(n, at)))
+            .collect()
+    }
     pub fn len(&self) -> usize {
         self.nodes.len()
     }

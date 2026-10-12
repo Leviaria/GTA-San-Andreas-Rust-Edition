@@ -133,7 +133,7 @@ pub(super) struct RemoteActor {
     model_changed: Instant,
     car_render_pose: Option<VehiclePose>,
 }
-fn duplicate(device: &wgpu::Device, batches: &[GpuBatch]) -> Vec<GpuBatch> {
+pub(super) fn duplicate(device: &wgpu::Device, batches: &[GpuBatch]) -> Vec<GpuBatch> {
     batches
         .iter()
         .map(|b| GpuBatch {

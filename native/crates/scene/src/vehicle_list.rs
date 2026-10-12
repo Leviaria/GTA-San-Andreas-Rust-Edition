@@ -9,6 +9,18 @@ pub struct OriginalCar {
     pub model: String,
     /// GXT key of the in-game name, e.g. `INFERNU`.
     pub name_key: String,
+    /// The game's own grouping, e.g. `poorfamily` or `executive`.
+    pub class: String,
+}
+
+impl OriginalCar {
+    /// Ordinary cars the game itself sends through city traffic.
+    pub fn is_civilian(&self) -> bool {
+        matches!(
+            self.class.as_str(),
+            "poorfamily" | "richfamily" | "executive" | "worker" | "taxi" | "big"
+        )
+    }
 }
 
 /// Cars a player can spawn and drive with the four-wheel model. Bikes, boats,
@@ -55,6 +67,7 @@ fn parse_cars(ide: &str) -> Vec<OriginalCar> {
         cars.push(OriginalCar {
             model,
             name_key: fields[5].to_ascii_uppercase(),
+            class: fields[7].to_ascii_lowercase(),
         });
     }
     cars
@@ -144,6 +157,7 @@ mod tests {
             ["landstal", "infernus"]
         );
         assert_eq!(cars[1].name_key, "INFERNU");
+        assert!(cars[0].is_civilian() && cars[1].is_civilian());
     }
 
     #[test]
