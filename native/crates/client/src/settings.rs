@@ -48,6 +48,10 @@ pub struct Settings {
     pub saturation: f32,
     pub vignette: f32,
     pub atmospheric_fog: bool,
+    pub sun_lighting: f32,
+    pub sun_shadows: bool,
+    /// Fixed hour of day, or `None` for the running day/night cycle.
+    pub fixed_hour: Option<u8>,
     pub fsr1: bool,
     pub renderer: Renderer,
     pub fps_limit: u32,
@@ -79,6 +83,9 @@ impl Default for Settings {
             saturation: 1.05,
             vignette: 0.12,
             atmospheric_fog: true,
+            sun_lighting: 0.35,
+            sun_shadows: true,
+            fixed_hour: None,
             fsr1: true,
             renderer: Renderer::Auto,
             fps_limit: 0,
@@ -96,6 +103,9 @@ impl Settings {
         if ![1, 2, 4, 8, 16].contains(&self.texture_anisotropy) {
             self.texture_anisotropy = defaults.texture_anisotropy;
         }
+        if self.fixed_hour.is_some_and(|hour| hour > 23) {
+            self.fixed_hour = None;
+        }
         if ![0, 30, 60, 90, 120, 144, 165, 240].contains(&self.fps_limit) {
             self.fps_limit = 0;
         }
@@ -105,6 +115,7 @@ impl Settings {
             (&mut self.exposure, defaults.exposure, 0.5, 1.8),
             (&mut self.saturation, defaults.saturation, 0.0, 1.5),
             (&mut self.vignette, defaults.vignette, 0.0, 0.5),
+            (&mut self.sun_lighting, defaults.sun_lighting, 0.0, 1.0),
             (&mut self.master_volume, defaults.master_volume, 0.0, 1.0),
             (&mut self.music_volume, defaults.music_volume, 0.0, 1.0),
             (&mut self.effects_volume, defaults.effects_volume, 0.0, 1.0),
@@ -173,6 +184,8 @@ impl Settings {
         self.saturation = 1.05;
         self.vignette = 0.12;
         self.atmospheric_fog = true;
+        self.sun_lighting = 0.35;
+        self.sun_shadows = index > 0;
         self.texture_anisotropy = [1, 4, 8, 16][index.min(3)];
     }
     pub fn preset(&self) -> &'static str {

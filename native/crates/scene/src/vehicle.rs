@@ -107,6 +107,17 @@ impl Car {
         self.handling = handling;
         self
     }
+    /// Sideways tyre slip in m/s, zero while airborne. Drives skid marks.
+    pub fn slip(&self) -> f32 {
+        if self.airborne {
+            0.0
+        } else {
+            self.lateral_speed.abs()
+        }
+    }
+    pub fn airborne(&self) -> bool {
+        self.airborne
+    }
     pub fn forward(&self) -> Vec3 {
         Vec3::new(self.yaw.sin(), 0.0, self.yaw.cos())
     }

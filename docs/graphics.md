@@ -18,6 +18,30 @@ live and persist, except renderer and texture-filter changes which require resta
 - FSR filtering happens after scene anti-aliasing and tone mapping, in sRGB
   space. EASU operates when upscaling; at native resolution or supersampling,
   linear scaling is followed by RCAS. A Linear option bypasses FSR.
+- Sun lighting (0–100%, default 35%): outdoor surfaces are shaded by how they
+  face a fixed sun direction, with a sky/ground ambient tint, multiplied on top
+  of the original prelit vertex colors. Face normals come from screen-space
+  derivatives, so moving cars and peds are lit without extra vertex data.
+  Interiors are unaffected and 0% restores the original look.
+- Sun shadows (on except in Performance): a 2048² orthographic depth map
+  covers 180 m around the player, snapped to texels, with alpha-tested casters
+  so foliage casts shaped shadows. 3×3 PCF softens edges and the shadow fades
+  out at the border. It renders nearby geometry a second time. Interiors skip it.
+  `--probe-shadows --renderer vulkan` (also a unit test) renders an owned scene through the real
+  shaders (skipped without a GPU adapter; lavapipe works).
+- Day/night cycle: one game minute per real second, starting at 12:00, with a
+  clock in the HUD. Graphics → Time of day can fix any hour instead. Sky,
+  haze, sun colour and night darkening come from the first weather block
+  (extra sunny Los Santos) of the player's own `data/timecyc.dat`, with
+  built-in colours if it cannot be read. The sun rises in the east at 06:00
+  and sets in the west at 20:00; a dimmer moon lights the night, and shadows
+  fade around sunrise and sunset. Night darkening scales the day-baked prelit
+  colours; SA's separate night vertex colours are not used yet.
+- Night lights: street lamps and other 2DFX light records in the original
+  models get additive coronas and soft light pools on the ground below them,
+  fading in as daylight drops. The player's car gets headlight coronas and a
+  light pool on the road ahead. These are decals, not real-time point lights:
+  they do not light walls, cars or peds. Weather and multiplayer time sync are not implemented.
 - FXAA, adjustable sharpening, a small bright-pass bloom filter, exposure,
   saturation, vignette and outdoor distance haze. Fog is disabled indoors.
 - A linear RGBA16F intermediate scene target and filmic display mapping.
@@ -36,8 +60,7 @@ live and persist, except renderer and texture-filter changes which require resta
   Original radio playback is still pending.
 
 Original SA vertex lighting and textures remain the scene material basis.
-The post-processing pass does not replace them with PBR materials or add
-dynamic shadows. No performance improvement percentage is claimed.
+The post-processing pass does not replace them with PBR materials. No performance improvement percentage is claimed.
 
 ## DLSS and temporal FSR
 

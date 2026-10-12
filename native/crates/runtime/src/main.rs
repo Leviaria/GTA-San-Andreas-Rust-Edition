@@ -10,6 +10,7 @@ mod chat;
 mod client_scripts;
 mod controller;
 mod culling;
+mod daycycle;
 mod gameplay_audio;
 mod gps;
 mod menu;
@@ -22,8 +23,11 @@ mod script_ui;
 mod server_events;
 mod session_resources;
 mod settings;
+mod shadow;
+mod skids;
 mod streaming;
 mod upload;
+mod zones;
 use streaming::{Streamer, ORIGIN, RADIUS};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -44,6 +48,50 @@ struct GpuBatch {
     animated: bool,
     uv_animation: Option<Arc<sa_assets::uvanim::UvAnimation>>,
     base: Vec<f32>,
+}
+const HEADLIGHT_VERTICES: usize = 18;
+/// A light pool on the road ahead of the car and two coronas at its nose,
+/// in the corona/pool vertex encoding of `sa_scene::lights`.
+fn headlight_vertices(car: &sa_scene::vehicle::Car) -> [sa_scene::Vertex; HEADLIGHT_VERTICES] {
+    let forward = car.forward();
+    let side = Vec3::new(forward.z, 0.0, -forward.x);
+    let ground = car.position - Vec3::Y * (car.clearance - 0.05);
+    let warm = [1.0, 0.92, 0.75, 1.0];
+    let corners = [
+        [-1.0, -1.0],
+        [1.0, -1.0],
+        [1.0, 1.0],
+        [-1.0, -1.0],
+        [1.0, 1.0],
+        [-1.0, 1.0],
+    ];
+    let mut out = [sa_scene::Vertex::default(); HEADLIGHT_VERTICES];
+    for (vertex, [x, z]) in out.iter_mut().zip(corners) {
+        // 3 m wide at the bumper widening to 6 m, reaching 16 m ahead.
+        let along = 2.0 + (z + 1.0) * 7.0;
+        let half = 1.5 + (z + 1.0) * 0.75;
+        *vertex = sa_scene::Vertex {
+            position: (ground + forward * along + side * (x * half)).to_array(),
+            uv: [x, z * 0.6 - 0.4],
+            color: warm,
+        };
+    }
+    for (lamp, offset) in [-0.65, 0.65].into_iter().enumerate() {
+        let centre = car.position + forward * 2.2 + side * offset;
+        for (i, [x, y]) in corners.into_iter().enumerate() {
+            out[6 + lamp * 6 + i] = sa_scene::Vertex {
+                position: centre.to_array(),
+                uv: [x * 0.4, y * 0.4],
+                color: warm,
+            };
+        }
+    }
+    out
+}
+/// Corona and light-pool batches, drawn by their own additive pipelines.
+fn is_glow(batch: &GpuBatch) -> bool {
+    batch.texture_key == sa_scene::lights::CORONA_KEY
+        || batch.texture_key == sa_scene::lights::POOL_KEY
 }
 struct SpawnedPed {
     model: usize,
@@ -69,6 +117,17 @@ struct State {
     camera_group: wgpu::BindGroup,
     opaque: wgpu::RenderPipeline,
     blended: wgpu::RenderPipeline,
+    corona: wgpu::RenderPipeline,
+    light_pool: wgpu::RenderPipeline,
+    headlights: wgpu::Buffer,
+    skids: skids::Skids,
+    skid_buffer: wgpu::Buffer,
+    white: wgpu::BindGroup,
+    shadows: shadow::Shadows,
+    pub(crate) daycycle: daycycle::DayCycle,
+    zones: zones::Zones,
+    lighting: daycycle::Lighting,
+    light_frustum: culling::Frustum,
     batches: Vec<GpuBatch>,
     position: Vec3,
     yaw: f32,
@@ -310,7 +369,7 @@ impl State {
         });
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
-            size: 96,
+            size: 224,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -356,16 +415,27 @@ impl State {
                 },
             ],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("SA layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&image_layout)],
-            immediate_size: 0,
-        });
         let vertex = wgpu::VertexBufferLayout {
             array_stride: 36,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x2,2=>Float32x4],
         };
+        let shadows = shadow::Shadows::new(
+            &device,
+            &shader,
+            &camera_layout,
+            &image_layout,
+            vertex.clone(),
+        );
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("SA layout"),
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(&image_layout),
+                Some(&shadows.layout),
+            ],
+            immediate_size: 0,
+        });
         let make_pipeline = |alpha: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(if alpha { "SA alpha" } else { "SA opaque" }),
@@ -408,6 +478,85 @@ impl State {
         };
         let opaque = make_pipeline(false);
         let blended = make_pipeline(true);
+        let make_glow = |vertex_entry: &str, fragment_entry: &str| {
+            let additive = wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            };
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(fragment_entry),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vertex_entry),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(vertex.clone())],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fragment_entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: postprocess::SCENE_FORMAT,
+                        blend: Some(wgpu::BlendState {
+                            color: additive,
+                            alpha: additive,
+                        }),
+                        write_mask: wgpu::ColorWrites::COLOR,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24Plus,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let corona = make_glow("vs_corona", "fs_corona");
+        let skid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skid marks"),
+            size: (skids::VERTICES * std::mem::size_of::<sa_scene::Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let white_view = device
+            .create_texture_with_data(
+                &queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("white"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                Default::default(),
+                &[255; 4],
+            )
+            .create_view(&Default::default());
+        let headlights = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("headlights"),
+            size: (HEADLIGHT_VERTICES * std::mem::size_of::<sa_scene::Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let light_pool = make_glow("vs_main", "fs_pool");
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("SA textures"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -425,6 +574,20 @@ impl State {
                 1
             },
             ..Default::default()
+        });
+        let white = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("white"),
+            layout: &image_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&white_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
         });
         let animation = scene.animation.take();
         let collision = scene.collision.take();
@@ -509,6 +672,17 @@ impl State {
             camera_group,
             opaque,
             blended,
+            corona,
+            light_pool,
+            headlights,
+            skids: skids::Skids::default(),
+            skid_buffer,
+            white,
+            shadows,
+            daycycle: daycycle::DayCycle::default(),
+            zones: zones::Zones::default(),
+            lighting: daycycle::DayCycle::default().lighting(12.0),
+            light_frustum: culling::Frustum::default(),
             batches,
             position: if let Some(ref cut) = animation {
                 if cut.camera_keys.is_some() {
@@ -908,6 +1082,10 @@ impl State {
                 .min(if self.driving { 0.25 } else { 0.05 })
         };
         self.last = now;
+        if self.menu.settings.fixed_hour.is_none() {
+            // One game minute per real second, as in San Andreas.
+            self.daycycle.advance(dt);
+        }
         let stream_started = Instant::now();
         self.stream_world();
         self.metrics.stream_ms = stream_started.elapsed().as_secs_f64() * 1000.;
@@ -1011,14 +1189,19 @@ impl State {
                     self.keys.contains(&KeyCode::KeyD),
                     self.gamepad.move_x,
                 );
+                let handbrake = self.keys.contains(&KeyCode::Space) || self.gamepad.handbrake;
                 car.step(
                     world,
                     throttle,
                     steer,
-                    self.keys.contains(&KeyCode::Space) || self.gamepad.handbrake,
+                    handbrake,
                     self.menu.settings.vehicle_handling,
                     dt,
                 );
+                if dt > 0.0 {
+                    self.skids
+                        .update(car, skids::intensity(car, throttle, handbrake));
+                }
                 let center = [ORIGIN[0] + car.position.x, ORIGIN[1] - car.position.z];
                 if streaming::distance(center, self.region) > RADIUS - 60.0 {
                     car.position = previous;
@@ -1311,11 +1494,78 @@ impl State {
                 } else {
                     0.0
                 },
-                0.0,
-                0.0,
+                if self.interior == 0 {
+                    self.menu.settings.sun_lighting
+                } else {
+                    0.0
+                },
+                if self.shadows_active() { 1.0 } else { 0.0 },
                 0.0,
             ]),
         );
+        let hour = self
+            .menu
+            .settings
+            .fixed_hour
+            .map_or(self.daycycle.minutes / 60.0, f32::from);
+        let mut lighting = self.daycycle.lighting(hour);
+        if self.interior != 0 {
+            // Interiors keep their own baked lighting at every hour.
+            lighting.ambient = Vec3::ONE;
+            lighting.daylight = 0.0;
+        }
+        self.lighting = lighting;
+        let light = shadow::light_matrix(self.position, lighting.sun);
+        self.light_frustum = culling::Frustum::new(light);
+        self.queue.write_buffer(
+            &self.camera,
+            96,
+            bytemuck::cast_slice(&light.to_cols_array()),
+        );
+        self.queue.write_buffer(
+            &self.camera,
+            160,
+            bytemuck::cast_slice(&[
+                lighting.sun.extend(lighting.daylight).to_array(),
+                lighting.sun_color.extend(0.0).to_array(),
+                lighting.ambient.extend(0.0).to_array(),
+                lighting.sky.extend(0.0).to_array(),
+            ]),
+        );
+    }
+    /// World batches inside `frustum`, followed by every car and ped.
+    fn drawn_batches<'a>(
+        &'a self,
+        frustum: &'a culling::Frustum,
+    ) -> impl Iterator<Item = &'a GpuBatch> + 'a {
+        self.batches
+            .iter()
+            .filter(|batch| !is_glow(batch))
+            .filter(move |batch| !self.culling_enabled || frustum.visible(batch.bounds))
+            .chain(self.car.iter().flat_map(|(_, b)| b))
+            .chain(self.spawned_peds.iter().flat_map(|p| &p.batches))
+            .chain(
+                self.remote_actors
+                    .iter()
+                    .filter(|a| a.visible)
+                    .flat_map(|a| {
+                        a.car
+                            .iter()
+                            .filter(|_| a.car_visible)
+                            .chain(a.ped.iter().filter(|_| a.ped_visible))
+                    }),
+            )
+            .chain(
+                self.ped
+                    .iter()
+                    .filter(|_| {
+                        self.third_person && self.walking && !self.driving && self.ped_visible
+                    })
+                    .flat_map(|(_, b)| b),
+            )
+    }
+    fn shadows_active(&self) -> bool {
+        self.interior == 0 && self.menu.settings.sun_shadows
     }
     fn respawn(&mut self) {
         self.leave_passenger();
@@ -1703,6 +1953,11 @@ impl State {
                     });
             }
             self.update_map_overlay(coordinates);
+            self.menu.zone = self.zones.name_at(coordinates).map(str::to_owned);
+            self.menu.clock = match self.menu.settings.fixed_hour {
+                Some(hour) => (u32::from(hour), 0),
+                None => self.daycycle.clock(),
+            };
             action = self.menu.draw(
                 ui.ctx(),
                 coordinates,
@@ -1746,6 +2001,30 @@ impl State {
             &paint_jobs,
             &screen,
         );
+        if self.shadows_active() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("sun shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadows.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadows.pipeline);
+            pass.set_bind_group(0, &self.camera_group, &[]);
+            for b in self.drawn_batches(&self.light_frustum) {
+                pass.set_bind_group(1, &b.texture, &[]);
+                pass.set_vertex_buffer(0, b.buffer.slice(..));
+                pass.draw(0..b.count, 0..1);
+            }
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("SA world"),
@@ -1755,9 +2034,9 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.36,
-                            g: 0.55,
-                            b: 0.72,
+                            r: self.lighting.sky.x as f64,
+                            g: self.lighting.sky.y as f64,
+                            b: self.lighting.sky.z as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -1776,38 +2055,84 @@ impl State {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.camera_group, &[]);
+            pass.set_bind_group(2, &self.shadows.group, &[]);
             let mut alpha = false;
             pass.set_pipeline(&self.opaque);
-            for b in self
-                .batches
-                .iter()
-                .filter(|batch| !self.culling_enabled || self.frustum.visible(batch.bounds))
-                .chain(self.car.iter().flat_map(|(_, b)| b))
-                .chain(self.spawned_peds.iter().flat_map(|p| &p.batches))
-                .chain(
-                    self.remote_actors
-                        .iter()
-                        .filter(|a| a.visible)
-                        .flat_map(|a| {
-                            a.car
-                                .iter()
-                                .filter(|_| a.car_visible)
-                                .chain(a.ped.iter().filter(|_| a.ped_visible))
-                        }),
-                )
-                .chain(
-                    self.ped
-                        .iter()
-                        .filter(|_| {
-                            self.third_person && self.walking && !self.driving && self.ped_visible
-                        })
-                        .flat_map(|(_, b)| b),
-                )
-            {
+            for b in self.drawn_batches(&self.frustum) {
                 if b.alpha != alpha {
                     pass.set_pipeline(if b.alpha { &self.blended } else { &self.opaque });
                     alpha = b.alpha;
                 }
+                pass.set_bind_group(1, &b.texture, &[]);
+                pass.set_vertex_buffer(0, b.buffer.slice(..));
+                pass.draw(0..b.count, 0..1);
+            }
+            if self.interior == 0 {
+                if std::mem::take(&mut self.skids.dirty) {
+                    self.queue.write_buffer(
+                        &self.skid_buffer,
+                        0,
+                        bytemuck::cast_slice(&self.skids.vertices),
+                    );
+                }
+                pass.set_pipeline(&self.blended);
+                pass.set_bind_group(1, &self.white, &[]);
+                pass.set_vertex_buffer(0, self.skid_buffer.slice(..));
+                pass.draw(0..skids::VERTICES as u32, 0..1);
+            }
+        }
+        if self.lighting.daylight < 1.0 || self.interior != 0 {
+            // Reuses the scene depth from the world pass.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("night glows"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.postprocess.color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.postprocess.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.camera_group, &[]);
+            pass.set_bind_group(2, &self.shadows.group, &[]);
+            if let Some((car, batches)) = self.car.as_ref().filter(|_| self.interior == 0) {
+                if let Some(texture) = batches.first().map(|b| &b.texture) {
+                    self.queue.write_buffer(
+                        &self.headlights,
+                        0,
+                        bytemuck::cast_slice(&headlight_vertices(car)),
+                    );
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, self.headlights.slice(..));
+                    pass.set_pipeline(&self.light_pool);
+                    pass.draw(0..6, 0..1);
+                    pass.set_pipeline(&self.corona);
+                    pass.draw(6..HEADLIGHT_VERTICES as u32, 0..1);
+                }
+            }
+            for b in self
+                .batches
+                .iter()
+                .filter(|b| is_glow(b) && (!self.culling_enabled || self.frustum.visible(b.bounds)))
+            {
+                pass.set_pipeline(if b.texture_key == sa_scene::lights::CORONA_KEY {
+                    &self.corona
+                } else {
+                    &self.light_pool
+                });
                 pass.set_bind_group(1, &b.texture, &[]);
                 pass.set_vertex_buffer(0, b.buffer.slice(..));
                 pass.draw(0..b.count, 0..1);
@@ -2140,6 +2465,8 @@ impl ApplicationHandler for App {
         )) {
             Ok(mut state) => {
                 state.roads = roads;
+                state.daycycle = daycycle::DayCycle::load(&self.game_dir);
+                state.zones = zones::Zones::load(&self.game_dir);
                 state.persist_settings = !self.smoke;
                 if self.smoke_graphics {
                     state.menu.open_graphics();
@@ -3580,7 +3907,10 @@ fn main() -> Result<()> {
     let _session_intent =
         sa_client::launch::Session::from_args(&std::env::args().collect::<Vec<_>>())?;
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.iter().any(|arg| arg == "--probe-mipmaps") {
+    if args
+        .iter()
+        .any(|arg| arg == "--probe-mipmaps" || arg == "--probe-shadows")
+    {
         let renderer = args
             .windows(2)
             .find(|pair| pair[0] == "--renderer")
@@ -3592,6 +3922,15 @@ fn main() -> Result<()> {
             "auto" => settings::Renderer::Auto.backends(),
             _ => anyhow::bail!("Unknown renderer"),
         };
+        if args.iter().any(|arg| arg == "--probe-shadows") {
+            let (shadowed, sunny) = pollster::block_on(shadow::probe(backends))?;
+            println!("Sun shadow probe: shadowed {shadowed:.2}, sunny {sunny:.2}");
+            anyhow::ensure!(
+                sunny > 0.9 && shadowed < sunny * 0.75,
+                "shadow probe failed"
+            );
+            return Ok(());
+        }
         return pollster::block_on(mipmaps::probe(backends));
     }
     if let Some(pair) = args
@@ -4123,4 +4462,24 @@ fn main() -> Result<()> {
         anyhow::bail!(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod shader_tests {
+    #[test]
+    fn scene_shaders_validate() {
+        for (name, source) in [
+            ("shader.wgsl", include_str!("shader.wgsl")),
+            ("postprocess.wgsl", include_str!("postprocess.wgsl")),
+        ] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        }
+    }
 }
