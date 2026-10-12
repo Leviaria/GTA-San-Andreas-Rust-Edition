@@ -438,6 +438,7 @@ impl Menu {
                 ("Tire grip", format!("{:.1}", s.vehicle_handling), "Higher values give stronger cornering grip. Engine power stays the same."),
                 ("Traffic", if s.traffic_cars == 0 { "Off".into() } else { format!("{} cars", s.traffic_cars) }, "Cars driving the city's roads around you. Fewer cars run faster on weak PCs."),
                 ("Pedestrians", if s.pedestrians == 0 { "Off".into() } else { format!("{} people", s.pedestrians) }, "People walking the pavements around you. Fewer run faster on weak PCs."),
+                ("Car camera recenter", on(s.car_camera_recenter), "Swings the driving camera back behind the car after you stop moving the mouse. Off keeps it where you left it."),
             ],
             SettingsTab::Interface => vec![
                 ("HUD", on(s.show_hud), "Shows gameplay information over the world."),
@@ -574,6 +575,7 @@ impl Menu {
                     s.pedestrians + 4
                 }
             }
+            (SettingsTab::Gameplay, 7) => s.car_camera_recenter = !s.car_camera_recenter,
             (SettingsTab::Interface, 1) => s.show_hud = !s.show_hud,
             (SettingsTab::Interface, 2) => s.show_minimap = !s.show_minimap,
             (SettingsTab::Interface, 3) => s.show_speedometer = !s.show_speedometer,
