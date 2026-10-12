@@ -9,6 +9,7 @@ pub mod roads;
 mod roadsign;
 mod texture;
 pub mod vehicle;
+pub mod vehicle_list;
 pub mod water;
 use anyhow::{ensure, Context, Result};
 use sa_assets::{decode_dff, decode_txd, Geometry, Img, Texture};
@@ -416,7 +417,8 @@ pub fn load_car_model(game: &Path, model: &str) -> Result<Scene> {
         game,
         "models/generic/vehicle.txd",
     )?)?;
-    let mut scene = car_scene(&geometry, |name| {
+    let colours = vehicle_list::body_colours(game).remove(model);
+    let mut scene = car_scene(&geometry, colours, |name| {
         decode_txd(&taxi, name).or_else(|_| decode_txd(&common, name))
     })?;
     if let Some(original) = handling::for_model(game, model) {
@@ -426,6 +428,7 @@ pub fn load_car_model(game: &Path, model: &str) -> Result<Scene> {
 }
 fn car_scene(
     geometry: &[Geometry],
+    colours: Option<[[u8; 3]; 2]>,
     mut texture: impl FnMut(&str) -> Result<Texture>,
 ) -> Result<Scene> {
     let local = placement(0, 0, [0.0; 3], [0.0, 0.0, 0.0, 1.0])?;
@@ -441,8 +444,12 @@ fn car_scene(
                 continue;
             }
             let material = &mut part.materials[material_index];
+            // The game paints these two marker colours with the car's body colours.
+            let [primary, secondary] = colours.unwrap_or([[255, 205, 30], [255, 205, 30]]);
             if material.color[..3] == [60, 255, 0] {
-                material.color[..3].copy_from_slice(&[255, 205, 30]);
+                material.color[..3].copy_from_slice(&primary);
+            } else if colours.is_some() && material.color[..3] == [255, 0, 175] {
+                material.color[..3].copy_from_slice(&secondary);
             }
             if material.texture.is_none() {
                 material.texture = Some("runtime_white".into());

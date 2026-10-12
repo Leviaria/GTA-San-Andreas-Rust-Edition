@@ -425,7 +425,7 @@ impl WorldLoader {
                     .as_deref()
                     .map(|path| resource(&folder, path))
                     .transpose()?;
-                let mut scene = car_scene(&geometry, |name| {
+                let mut scene = car_scene(&geometry, None, |name| {
                     decode_txd(
                         dictionary
                             .as_deref()

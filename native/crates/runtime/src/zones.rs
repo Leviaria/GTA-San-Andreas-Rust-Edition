@@ -19,10 +19,7 @@ impl Zones {
     pub fn load(game: &Path) -> Self {
         let result = (|| -> anyhow::Result<Self> {
             let text = std::fs::read_to_string(game.join("data/info.zon"))?;
-            let gxt = std::fs::read(game.join("text/american.gxt"))
-                .ok()
-                .and_then(|bytes| parse_gxt(&bytes).ok())
-                .unwrap_or_default();
+            let gxt = load_gxt(game);
             Ok(Self {
                 zones: parse_zones(&text, &gxt),
             })
@@ -40,6 +37,20 @@ impl Zones {
             .min_by(|a, b| area(a).total_cmp(&area(b)))
             .map(|zone| zone.name.as_str())
     }
+}
+
+/// The player's English text table, keyed by JAMCRC of the GXT key.
+pub fn load_gxt(game: &Path) -> HashMap<u32, String> {
+    std::fs::read(game.join("text/american.gxt"))
+        .ok()
+        .and_then(|bytes| parse_gxt(&bytes).ok())
+        .unwrap_or_default()
+}
+
+pub fn gxt_text<'a>(table: &'a HashMap<u32, String>, key: &str) -> Option<&'a str> {
+    table
+        .get(&jamcrc(key.to_ascii_uppercase().as_bytes()))
+        .map(String::as_str)
 }
 
 fn area(zone: &Zone) -> f32 {

@@ -370,6 +370,7 @@ pub struct Menu {
     pub has_played: bool,
     pub has_checkpoint: bool,
     selected: usize,
+    list_filter: String,
     pub message: String,
     settings_tab: SettingsTab,
     settings_scroll_to_selection: bool,
@@ -714,6 +715,7 @@ impl Menu {
             has_played: false,
             has_checkpoint: false,
             selected: 0,
+            list_filter: String::new(),
             message: String::new(),
             settings_tab: SettingsTab::Display,
             settings_scroll_to_selection: true,
@@ -744,6 +746,7 @@ impl Menu {
         }
         self.page = Some(page);
         self.selected = 0;
+        self.list_filter.clear();
         self.settings_scroll_to_selection = true;
     }
     pub fn controller_input(
@@ -1365,22 +1368,35 @@ impl Menu {
                             ui.label(if page==Page::Cars {"Spawn nearby and enter. One vehicle is active at a time."} else {"Use a player model or spawn a nearby ped (S / D-pad right). Spawned peds idle; they have no AI."});
                             if page==Page::Peds && ui.button("Remove spawned peds").clicked(){action=Some(Action::ClearPeds);}
                             let names=if page==Page::Cars {self.cars.clone()}else{self.peds.clone()};
-                            let navigation=ctx.input(|i|(i.key_pressed(egui::Key::ArrowDown),i.key_pressed(egui::Key::ArrowUp),i.key_pressed(egui::Key::Enter)));
-                            if !names.is_empty(){
-                                if navigation.0 {self.selected=(self.selected+1)%names.len();}
-                                if navigation.1 {self.selected=(self.selected+names.len()-1)%names.len();}
-                                if navigation.2 {action=Some(if page==Page::Cars {Action::Car(self.selected)}else{Action::Ped(self.selected)});}
+                            // Long lists (every car in the game) get a search box.
+                            let mut typing=false;
+                            if names.len()>12 {
+                                let search=ui.add(egui::TextEdit::singleline(&mut self.list_filter).hint_text("Search").desired_width(440.0*scale));
+                                typing=search.has_focus();
                             }
-                            if page==Page::Peds && !names.is_empty() && ctx.input(|i|i.key_pressed(egui::Key::S)){action=Some(Action::SpawnPed(self.selected));}
-                            for (index,name) in names.iter().enumerate() {
+                            let filter=self.list_filter.to_lowercase();
+                            let visible:Vec<usize>=names.iter().enumerate().filter(|(_,n)|filter.is_empty()||n.to_lowercase().contains(&filter)).map(|(i,_)|i).collect();
+                            let navigation=ctx.input(|i|(i.key_pressed(egui::Key::ArrowDown),i.key_pressed(egui::Key::ArrowUp),i.key_pressed(egui::Key::Enter)));
+                            if !visible.is_empty(){
+                                let at=visible.iter().position(|&i|i==self.selected);
+                                if navigation.0 {self.selected=visible[at.map_or(0,|p|(p+1)%visible.len())];}
+                                if navigation.1 {self.selected=visible[at.map_or(visible.len()-1,|p|(p+visible.len()-1)%visible.len())];}
+                                if navigation.2 && visible.contains(&self.selected) {action=Some(if page==Page::Cars {Action::Car(self.selected)}else{Action::Ped(self.selected)});}
+                            }
+                            if page==Page::Peds && !typing && visible.contains(&self.selected) && ctx.input(|i|i.key_pressed(egui::Key::S)){action=Some(Action::SpawnPed(self.selected));}
+                            for &index in &visible {
+                                let name=&names[index];
                                 let text=if index==self.selected {format!("> {name}")}else{name.clone()};
                                 ui.horizontal(|ui| {
-                                if ui.add_sized([440.0*scale,40.0*scale],egui::Button::new(text)).clicked(){
+                                let button=ui.add_sized([440.0*scale,40.0*scale],egui::Button::new(text));
+                                if index==self.selected && (navigation.0||navigation.1) {button.scroll_to_me(None);}
+                                if button.clicked(){
                                     action=Some(if page==Page::Cars {Action::Car(index)}else{Action::Ped(index)});
                                 }
                                 if page==Page::Peds && ui.button("Spawn nearby").clicked(){action=Some(Action::SpawnPed(index));}
                                 });
                             }
+                            if visible.is_empty() && !names.is_empty(){ui.label("Nothing matches the search.");}
                             if names.is_empty(){ui.label("No models are available.");}
                         },
                         Page::Mods=>{
