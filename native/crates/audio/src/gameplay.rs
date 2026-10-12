@@ -140,7 +140,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod gun_tests {
     use super::*;
 
     #[test]
