@@ -36,7 +36,8 @@ struct VertexOut {
     return out;
 }
 // environment.x: outdoor haze, environment.y: sun lighting strength (0 keeps the
-// original prelit look), environment.z: sun shadow strength. The face normal comes from screen-space derivatives,
+// original prelit look), environment.z: sun shadow strength, environment.w: weather
+// haze density relative to clear weather. The face normal comes from screen-space derivatives,
 // so moving cars and animated peds need no extra vertex data.
 fn sun_shadow(world_position: vec3<f32>) -> f32 {
     let clip = camera.light * vec4<f32>(world_position, 1.0);
@@ -67,7 +68,8 @@ fn sun_light(world_position: vec3<f32>) -> vec3<f32> {
     return mix(vec3<f32>(1.0), lit, camera.environment.y) * shade * camera.ambient.rgb;
 }
 fn shade(color: vec4<f32>, input: VertexOut, light: vec3<f32>) -> vec4<f32> {
-    let haze = (1.0 - exp(-distance(input.world_position, camera.eye.xyz) * 0.00045)) * camera.environment.x;
+    let density = 0.00045 * max(camera.environment.w, 1.0);
+    let haze = (1.0 - exp(-distance(input.world_position, camera.eye.xyz) * density)) * camera.environment.x;
     return vec4<f32>(mix(color.rgb * light, camera.sky.rgb, haze), color.a);
 }
 @fragment fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {

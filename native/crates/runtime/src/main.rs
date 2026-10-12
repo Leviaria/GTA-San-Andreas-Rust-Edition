@@ -20,6 +20,7 @@ mod mipmaps;
 mod multiplayer;
 mod postprocess;
 mod progress;
+mod rain;
 mod script_ui;
 mod server_events;
 mod session_resources;
@@ -125,6 +126,8 @@ struct State {
     skids: skids::Skids,
     locomotion: locomotion::Locomotion,
     skid_buffer: wgpu::Buffer,
+    rain: rain::Rain,
+    rain_buffer: wgpu::Buffer,
     white: wgpu::BindGroup,
     shadows: shadow::Shadows,
     pub(crate) daycycle: daycycle::DayCycle,
@@ -593,6 +596,12 @@ impl State {
             })
         };
         let corona = make_glow("vs_corona", "fs_corona");
+        let rain_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rain"),
+            size: (rain::VERTICES * std::mem::size_of::<sa_scene::Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let skid_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("skid marks"),
             size: (skids::VERTICES * std::mem::size_of::<sa_scene::Vertex>()) as u64,
@@ -748,6 +757,8 @@ impl State {
             skids: skids::Skids::default(),
             locomotion: locomotion::Locomotion::default(),
             skid_buffer,
+            rain: rain::Rain::default(),
+            rain_buffer,
             white,
             shadows,
             daycycle: daycycle::DayCycle::default(),
@@ -1162,7 +1173,19 @@ impl State {
         if self.menu.settings.fixed_hour.is_none() {
             // One game minute per real second, as in San Andreas.
             self.daycycle.advance(dt);
+        } else {
+            self.daycycle.advance_weather(dt);
         }
+        self.daycycle.fixed_weather = self.menu.settings.fixed_weather.map(usize::from);
+        self.daycycle
+            .set_position(ORIGIN[0] + self.position.x, ORIGIN[1] - self.position.z);
+        let right = Vec3::new(self.yaw.cos(), 0.0, -self.yaw.sin());
+        let rain = if self.interior == 0 {
+            self.lighting.rain
+        } else {
+            0.0
+        };
+        self.rain.update(self.position, right, rain, dt);
         let stream_started = Instant::now();
         self.stream_world();
         self.metrics.stream_ms = stream_started.elapsed().as_secs_f64() * 1000.;
@@ -1567,6 +1590,20 @@ impl State {
             0,
             bytemuck::cast_slice(&camera_matrix.to_cols_array()),
         );
+        let hour = self
+            .menu
+            .settings
+            .fixed_hour
+            .map_or(self.daycycle.minutes / 60.0, f32::from);
+        let mut lighting = self.daycycle.lighting(hour);
+        if self.interior != 0 {
+            // Interiors keep their own baked lighting at every hour.
+            lighting.ambient = Vec3::ONE;
+            lighting.daylight = 0.0;
+            lighting.fog = 1.0;
+            lighting.rain = 0.0;
+        }
+        self.lighting = lighting;
         self.queue.write_buffer(
             &self.camera,
             64,
@@ -1585,22 +1622,14 @@ impl State {
                 } else {
                     0.0
                 },
-                if self.shadows_active() { 1.0 } else { 0.0 },
-                0.0,
+                if self.shadows_active() {
+                    lighting.shadow
+                } else {
+                    0.0
+                },
+                lighting.fog,
             ]),
         );
-        let hour = self
-            .menu
-            .settings
-            .fixed_hour
-            .map_or(self.daycycle.minutes / 60.0, f32::from);
-        let mut lighting = self.daycycle.lighting(hour);
-        if self.interior != 0 {
-            // Interiors keep their own baked lighting at every hour.
-            lighting.ambient = Vec3::ONE;
-            lighting.daylight = 0.0;
-        }
-        self.lighting = lighting;
         let light = shadow::light_matrix(self.position, lighting.sun);
         self.light_frustum = culling::Frustum::new(light);
         self.queue.write_buffer(
@@ -2169,6 +2198,16 @@ impl State {
                 pass.set_bind_group(1, &self.white, &[]);
                 pass.set_vertex_buffer(0, self.skid_buffer.slice(..));
                 pass.draw(0..skids::VERTICES as u32, 0..1);
+                if self.rain.count > 0 {
+                    let used = self.rain.count as usize;
+                    self.queue.write_buffer(
+                        &self.rain_buffer,
+                        0,
+                        bytemuck::cast_slice(&self.rain.vertices[..used]),
+                    );
+                    pass.set_vertex_buffer(0, self.rain_buffer.slice(..));
+                    pass.draw(0..self.rain.count, 0..1);
+                }
             }
         }
         if self.lighting.daylight < 1.0 || self.interior != 0 {
