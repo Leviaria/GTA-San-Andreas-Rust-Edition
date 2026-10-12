@@ -180,6 +180,8 @@ struct State {
     car_render_pose: Option<sa_net::VehiclePose>,
     driving: bool,
     car_catalog: Vec<Option<(sa_scene::vehicle::Car, Vec<GpuBatch>)>>,
+    /// Menu name to gta3.img model for cars loaded on first use.
+    original_car_models: std::collections::HashMap<String, String>,
     ped_catalog: Vec<Option<(sa_scene::ped::Ped, Vec<GpuBatch>)>>,
     spawned_peds: Vec<SpawnedPed>,
     npc_seconds: f32,
@@ -247,6 +249,33 @@ impl State {
             } else {
                 sa_audio::MenuSound::Highlight
             });
+        }
+    }
+    /// Load an original car the first time it is needed. The catalog only
+    /// holds names for these, which keeps startup quick and memory low.
+    fn ensure_car_loaded(&mut self, index: usize) {
+        if index == self.active_car || !matches!(self.car_catalog.get(index), Some(None)) {
+            return;
+        }
+        let Some(model) = self
+            .menu
+            .cars
+            .get(index)
+            .and_then(|name| self.original_car_models.get(name))
+            .cloned()
+        else {
+            return;
+        };
+        match sa_scene::load_car_model(&self.resource_game_dir, &model) {
+            Ok(scene) => {
+                let previous = self.car.take();
+                match self.install_car(scene) {
+                    Ok(()) => self.car_catalog[index] = self.car.take(),
+                    Err(e) => eprintln!("Vehicle {model} upload failed: {e:#}"),
+                }
+                self.car = previous;
+            }
+            Err(e) => eprintln!("Vehicle {model} unavailable: {e:#}"),
         }
     }
     fn install_car(&mut self, scene: Scene) -> Result<()> {
@@ -750,6 +779,7 @@ impl State {
             car_render_pose: None,
             driving: false,
             car_catalog: vec![None],
+            original_car_models: std::collections::HashMap::new(),
             ped_catalog: vec![None],
             spawned_peds: Vec::new(),
             npc_seconds: 0.0,
@@ -1730,6 +1760,7 @@ impl State {
                     self.menu.message = "Vehicles can be spawned outside.".into();
                     return;
                 }
+                self.ensure_car_loaded(index);
                 if index < self.car_catalog.len() {
                     let selected = if index == self.active_car {
                         self.car.as_ref()
@@ -2522,6 +2553,12 @@ impl ApplicationHandler for App {
                     }
                     state.car = previous;
                 }
+                state.original_car_models = original_car_names(&self.game_dir);
+                append_original_cars(
+                    &mut state.car_catalog,
+                    &mut state.menu.cars,
+                    &state.original_car_models,
+                );
                 for (name, ped) in std::mem::take(&mut self.ped_catalog) {
                     match ped.scene().and_then(|scene| {
                         State::upload_scene(
@@ -3914,6 +3951,47 @@ impl ApplicationHandler for App {
         }
     }
 }
+/// Every drivable car in the player's vehicles.ide, by in-game name.
+fn original_car_names(game: &std::path::Path) -> std::collections::HashMap<String, String> {
+    let gxt = zones::load_gxt(game);
+    let mut names = std::collections::HashMap::new();
+    for car in sa_scene::vehicle_list::original_cars(game) {
+        let mut name = zones::gxt_text(&gxt, &car.name_key)
+            .map(str::to_owned)
+            .unwrap_or_else(|| title_case(&car.model));
+        if names.contains_key(&name) {
+            name = format!("{name} ({})", car.model);
+        }
+        names.insert(name, car.model);
+    }
+    names
+}
+fn title_case(model: &str) -> String {
+    let mut chars = model.chars();
+    chars
+        .next()
+        .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+        .unwrap_or_default()
+}
+/// Add every original car not already in the menu, sorted by name, as an
+/// empty slot that `ensure_car_loaded` fills on first use.
+fn append_original_cars<T>(
+    catalog: &mut Vec<Option<T>>,
+    menu: &mut Vec<String>,
+    originals: &std::collections::HashMap<String, String>,
+) {
+    let mut extra: Vec<_> = originals
+        .keys()
+        .filter(|name| !menu.iter().any(|m| m.eq_ignore_ascii_case(name)))
+        .cloned()
+        .collect();
+    extra.sort();
+    for name in extra {
+        catalog.push(None);
+        menu.push(name);
+    }
+}
+
 fn main() -> Result<()> {
     let _session_intent =
         sa_client::launch::Session::from_args(&std::env::args().collect::<Vec<_>>())?;
