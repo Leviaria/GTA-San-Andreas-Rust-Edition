@@ -230,6 +230,11 @@ struct State {
     traffic: traffic::Traffic,
     arsenal: weapons::Arsenal,
     arsenal_loaded: bool,
+    /// Weapon model id to (model, txd), and the meshes of guns drawn so far.
+    weapon_models: Option<std::collections::HashMap<i32, (String, String)>>,
+    gun_meshes: std::collections::HashMap<i32, Option<Vec<GpuBatch>>>,
+    /// Model id of the gun drawn in CJ's hand this frame.
+    gun_drawn: Option<i32>,
     /// Left and right mouse buttons: fire and aim.
     fire_held: bool,
     aim_held: bool,
@@ -880,6 +885,9 @@ impl State {
             traffic: traffic::Traffic::default(),
             arsenal: weapons::Arsenal::default(),
             arsenal_loaded: false,
+            weapon_models: None,
+            gun_meshes: std::collections::HashMap::new(),
+            gun_drawn: None,
             fire_held: false,
             aim_held: false,
             crowd: crowd::Crowd::default(),
@@ -1394,13 +1402,21 @@ impl State {
                     let delta = self.position - previous_position;
                     let horizontal = Vec3::new(delta.x, 0.0, delta.z);
                     let speed = horizontal.length() / dt;
-                    let clip = locomotion::clip_for_speed(speed);
+                    let aiming = self.aim_held && self.arsenal.held().is_some();
+                    let clip = if aiming && speed < 0.15 {
+                        "gun_stand"
+                    } else {
+                        locomotion::clip_for_speed(speed)
+                    };
                     if clip != self.ped_clip {
                         self.ped_clip = clip;
                         self.ped_seconds = 0.0;
                     }
                     self.ped_seconds += dt;
-                    if horizontal.length_squared() > 0.00001 {
+                    if aiming {
+                        // Aiming turns CJ to face where the camera looks.
+                        self.ped_yaw = locomotion::turn_toward(self.ped_yaw, self.yaw, dt);
+                    } else if horizontal.length_squared() > 0.00001 {
                         self.ped_yaw = locomotion::turn_toward(
                             self.ped_yaw,
                             horizontal.x.atan2(horizontal.z),
@@ -1411,7 +1427,8 @@ impl State {
                 // Not every ped.ifp has a sprint clip; jog through it instead.
                 let posed = ped
                     .frame(self.ped_clip, self.ped_seconds)
-                    .or_else(|_| ped.frame("run_player", self.ped_seconds));
+                    .or_else(|_| ped.frame("run_player", self.ped_seconds))
+                    .or_else(|_| ped.frame("idle_stance", self.ped_seconds));
                 match posed {
                     Ok(posed) => {
                         let rotation = Quat::from_rotation_y(self.ped_yaw + std::f32::consts::PI);
@@ -1434,6 +1451,7 @@ impl State {
                 }
             }
         }
+        self.pose_held_gun();
         self.npc_seconds += dt;
         for npc in &self.spawned_peds {
             let source = if npc.model == self.active_ped {
@@ -1706,6 +1724,13 @@ impl State {
                         self.third_person && self.walking && !self.driving && self.ped_visible
                     })
                     .flat_map(|(_, b)| b),
+            )
+            .chain(
+                self.gun_drawn
+                    .and_then(|id| self.gun_meshes.get(&id))
+                    .into_iter()
+                    .flatten()
+                    .flatten(),
             )
     }
     fn shadows_active(&self) -> bool {

@@ -113,6 +113,40 @@ fn parse_weapons(text: &str) -> Vec<Weapon> {
         .collect()
 }
 
+/// Weapon model id to (model, texture dictionary), from the `weap` section
+/// of `data/default.ide`.
+pub fn weapon_models(game: &Path) -> std::collections::HashMap<i32, (String, String)> {
+    sa_assets::game_path::resolve(game, "data/default.ide")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| parse_weapon_models(&text))
+        .unwrap_or_default()
+}
+
+fn parse_weapon_models(ide: &str) -> std::collections::HashMap<i32, (String, String)> {
+    let mut models = std::collections::HashMap::new();
+    let mut section = false;
+    for line in ide.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        match line {
+            "weap" => section = true,
+            "end" => section = false,
+            _ if section => {
+                let fields: Vec<_> = line.split(',').map(str::trim).collect();
+                if let (Some(Ok(id)), Some(model), Some(txd)) = (
+                    fields.first().map(|f| f.parse::<i32>()),
+                    fields.get(1),
+                    fields.get(2),
+                ) {
+                    models.insert(id, (model.to_ascii_lowercase(), txd.to_ascii_lowercase()));
+                }
+            }
+            _ => {}
+        }
+    }
+    models
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +169,15 @@ mod tests {
         assert_eq!(guns[0].group, "colt45");
         assert_eq!(guns[2].label(), "Desert Eagle");
         assert!(guns[1].interval() > guns[0].interval());
+    }
+
+    #[test]
+    fn reads_weapon_models_from_default_ide() {
+        let ide = "objs\n1, x, x, 1, 0\nend\nweap\n346, colt45, colt45, colt45, 1, 50, 0\n356, M4, m4, rifle, 1, 50, 0\nend\n";
+        let models = parse_weapon_models(ide);
+        assert_eq!(models[&346], ("colt45".to_owned(), "colt45".to_owned()));
+        assert_eq!(models[&356].0, "m4");
+        assert!(!models.contains_key(&1));
     }
 
     #[test]

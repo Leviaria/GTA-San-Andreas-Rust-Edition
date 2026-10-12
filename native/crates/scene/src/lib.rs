@@ -991,6 +991,56 @@ pub fn load_first_model(game: &Path) -> Result<Scene> {
         collision: None,
     })
 }
+/// A small held model such as a gun (`colt45`), centred on its own origin.
+pub fn load_weapon_model(game: &Path, model: &str, txd: &str) -> Result<Scene> {
+    ensure!(
+        [model, txd]
+            .iter()
+            .all(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')),
+        "invalid weapon model name"
+    );
+    let mut img = Img::open(&sa_assets::game_path::resolve(game, "models/gta3.img")?)?;
+    let geometry = decode_dff(&img.read(&format!("{model}.dff"))?)?;
+    let dictionary = img.read(&format!("{txd}.txd"))?;
+    let r = placement(0, 0, [0.0; 3], [0.0, 0.0, 0.0, 1.0])?;
+    let mut batches = HashMap::new();
+    let triangles = add_model(
+        &mut batches,
+        &geometry,
+        &r,
+        [0.0; 2],
+        &format!("weapon_{model}"),
+    )?;
+    let mut textures = HashMap::new();
+    for key in batches.keys() {
+        let image = match key.split_once(':') {
+            Some((_, name)) if key != "runtime:white" => decode_txd(&dictionary, name)?,
+            _ => Texture {
+                width: 1,
+                height: 1,
+                rgba: vec![255; 4],
+                has_alpha: false,
+            },
+        };
+        textures.insert(key.clone(), image);
+    }
+    let mut batches: Vec<_> = batches.into_values().collect();
+    for batch in &mut batches {
+        batch.alpha |= textures[&batch.key].needs_blending();
+        // Moved with the hand every frame, so the engine keeps its vertices.
+        batch.animated = true;
+    }
+    Ok(Scene {
+        vehicle_handling: crate::vehicle::Handling::default(),
+        water: None,
+        batches,
+        textures,
+        placements: 1,
+        triangles,
+        animation: None,
+        collision: None,
+    })
+}
 pub fn load_cuttest(game: &Path) -> Result<Scene> {
     let game = game.canonicalize()?;
     let animation = sa_script::load_cuttest_animation(&game)?;

@@ -1,7 +1,7 @@
 //! Guns the player carries: choosing one, firing, reloading, and what a shot
 //! hits. Damage, range and clip size come from the player's own weapon.dat.
 use super::State;
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use sa_scene::weapon_list::Weapon;
 
 /// Seconds a reload takes.
@@ -129,7 +129,71 @@ pub fn pellet_directions(aim: Vec3, pellets: u32) -> Vec<Vec3> {
         .collect()
 }
 
+/// HAnim id of the right hand in San Andreas peds.
+const RIGHT_HAND: i32 = 24;
+
 impl State {
+    /// Draw the held gun in CJ's right hand, following the current clip.
+    pub(super) fn pose_held_gun(&mut self) {
+        self.gun_drawn = None;
+        let visible = self.walking && !self.driving && self.third_person && self.ped_visible;
+        let Some(model) = self
+            .arsenal
+            .held()
+            .map(|held| held.weapon.model)
+            .filter(|_| visible)
+        else {
+            return;
+        };
+        if !self.gun_meshes.contains_key(&model) {
+            let models = self.weapon_models.get_or_insert_with(|| {
+                sa_scene::weapon_list::weapon_models(&self.resource_game_dir)
+            });
+            let loaded = models.get(&model).cloned().and_then(|(name, txd)| {
+                sa_scene::load_weapon_model(&self.resource_game_dir, &name, &txd)
+                    .and_then(|scene| {
+                        Self::upload_scene(
+                            &self.device,
+                            &self.queue,
+                            &self.image_layout,
+                            &self.sampler,
+                            &self.mipmaps,
+                            scene,
+                        )
+                    })
+                    .map_err(|e| eprintln!("Gun model {name} unavailable: {e:#}"))
+                    .ok()
+            });
+            self.gun_meshes.insert(model, loaded);
+        }
+        let (Some(Some(batches)), Some((ped, _)), Some(player)) =
+            (self.gun_meshes.get(&model), &self.ped, &self.player)
+        else {
+            return;
+        };
+        let Ok(hand) = ped
+            .bone_matrix(self.ped_clip, self.ped_seconds, RIGHT_HAND)
+            .or_else(|_| ped.bone_matrix("run_player", self.ped_seconds, RIGHT_HAND))
+            .or_else(|_| ped.bone_matrix("idle_stance", self.ped_seconds, RIGHT_HAND))
+        else {
+            return;
+        };
+        let body = glam::Mat4::from_rotation_translation(
+            Quat::from_rotation_y(self.ped_yaw + std::f32::consts::PI),
+            player.feet,
+        ) * hand;
+        for batch in batches {
+            let mut raw = batch.base.clone();
+            for v in raw.as_chunks_mut::<9>().0.iter_mut() {
+                let p = body.transform_point3(Vec3::new(v[0], v[1], v[2]));
+                v[..3].copy_from_slice(&p.to_array());
+            }
+            self.queue
+                .write_buffer(&batch.buffer, 0, bytemuck::cast_slice(&raw));
+        }
+        self.gun_drawn = Some(model);
+    }
+
     pub(super) fn update_weapons(&mut self, dt: f32) {
         if self.arsenal.guns.is_empty() && !self.arsenal_loaded {
             self.arsenal_loaded = true;
