@@ -13,6 +13,7 @@ mod culling;
 mod daycycle;
 mod gameplay_audio;
 mod gps;
+mod locomotion;
 mod menu;
 mod metrics;
 mod mipmaps;
@@ -121,6 +122,7 @@ struct State {
     light_pool: wgpu::RenderPipeline,
     headlights: wgpu::Buffer,
     skids: skids::Skids,
+    locomotion: locomotion::Locomotion,
     skid_buffer: wgpu::Buffer,
     white: wgpu::BindGroup,
     shadows: shadow::Shadows,
@@ -676,6 +678,7 @@ impl State {
             light_pool,
             headlights,
             skids: skids::Skids::default(),
+            locomotion: locomotion::Locomotion::default(),
             skid_buffer,
             white,
             shadows,
@@ -1175,6 +1178,9 @@ impl State {
         } else {
             speed
         };
+        if !self.walking || self.driving || self.passenger.is_some() {
+            self.locomotion.stop();
+        }
         if self.passenger.is_some() {
             // The host grants the seat; the interpolated remote car drives its camera.
         } else if self.driving {
@@ -1219,35 +1225,38 @@ impl State {
             }
         } else if self.walking {
             if let (Some(world), Some(player)) = (&self.collision, &mut self.player) {
-                let horizontal = Vec3::new(motion.x, 0.0, motion.z).clamp_length_max(1.0);
-                let walking_speed = if self.gamepad.sprint
+                let direction = Vec3::new(motion.x, 0.0, motion.z).clamp_length_max(1.0);
+                let gait = if self.gamepad.sprint
                     || self.keys.contains(&KeyCode::ShiftLeft)
                     || self.keys.contains(&KeyCode::ShiftRight)
                 {
-                    9.0
+                    locomotion::Gait::Sprint
+                } else if self.keys.contains(&KeyCode::AltLeft) {
+                    locomotion::Gait::Walk
                 } else {
-                    4.5
+                    locomotion::Gait::Run
                 };
+                let velocity = self.locomotion.update(direction, gait, dt);
                 if let Some(water) = &self.water {
                     player.step_in_water(
                         world,
                         water,
                         ORIGIN,
-                        horizontal * walking_speed,
+                        velocity,
                         self.keys.contains(&KeyCode::Space) || self.gamepad.jump,
                         dt,
                     );
                 } else if self.interior != 0 {
                     player.step_in_room(
                         world,
-                        horizontal * walking_speed,
+                        velocity,
                         self.keys.contains(&KeyCode::Space) || self.gamepad.jump,
                         dt,
                     );
                 } else {
                     player.step(
                         world,
-                        horizontal * walking_speed,
+                        velocity,
                         self.keys.contains(&KeyCode::Space) || self.gamepad.jump,
                         dt,
                     );
@@ -1263,23 +1272,25 @@ impl State {
                     let delta = self.position - previous_position;
                     let horizontal = Vec3::new(delta.x, 0.0, delta.z);
                     let speed = horizontal.length() / dt;
-                    let clip = if speed < 0.1 {
-                        "idle_stance"
-                    } else if speed > 5.0 {
-                        "run_player"
-                    } else {
-                        "walk_player"
-                    };
+                    let clip = locomotion::clip_for_speed(speed);
                     if clip != self.ped_clip {
                         self.ped_clip = clip;
                         self.ped_seconds = 0.0;
                     }
                     self.ped_seconds += dt;
                     if horizontal.length_squared() > 0.00001 {
-                        self.ped_yaw = horizontal.x.atan2(horizontal.z);
+                        self.ped_yaw = locomotion::turn_toward(
+                            self.ped_yaw,
+                            horizontal.x.atan2(horizontal.z),
+                            dt,
+                        );
                     }
                 }
-                match ped.frame(self.ped_clip, self.ped_seconds) {
+                // Not every ped.ifp has a sprint clip; jog through it instead.
+                let posed = ped
+                    .frame(self.ped_clip, self.ped_seconds)
+                    .or_else(|_| ped.frame("run_player", self.ped_seconds));
+                match posed {
                     Ok(posed) => {
                         let rotation = Quat::from_rotation_y(self.ped_yaw + std::f32::consts::PI);
                         for (mesh, batch) in posed.iter().zip(batches) {
