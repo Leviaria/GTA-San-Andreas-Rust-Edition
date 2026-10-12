@@ -337,10 +337,7 @@ fn parse(text: &str) -> anyhow::Result<Vec<[Palette; 8]>> {
             );
         }
     }
-    Ok(rows
-        .chunks_exact(8)
-        .map(|block| std::array::from_fn(|i| block[i]))
-        .collect())
+    Ok(rows.as_chunks::<8>().0.to_vec())
 }
 
 /// Interpolate a weather's eight rows at an hour, wrapping past midnight.
