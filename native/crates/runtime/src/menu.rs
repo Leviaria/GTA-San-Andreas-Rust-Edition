@@ -427,6 +427,7 @@ impl Menu {
                 ("Sun shadows", on(s.sun_shadows), "Buildings, trees, cars and people cast shadows near you outdoors. Renders the nearby scene a second time; off in the Performance preset."),
                 ("Time of day", s.fixed_hour.map_or("Day/night cycle".into(), |hour| format!("{hour:02}:00")), "The cycle runs one game minute per real second. A fixed hour stops the clock."),
                 ("Texture filtering", if s.texture_anisotropy == 1 { "Trilinear".into() } else { format!("{}x anisotropic", s.texture_anisotropy) }, "Keeps road and building textures clearer at shallow angles. Mipmaps reduce distant texture shimmer. Requires restart."),
+                ("Weather", s.fixed_weather.map_or("Changes by area".into(), |w| crate::settings::WEATHER_NAMES[usize::from(w)].into()), "Weather follows the part of the map you are in and changes every few game hours, using your timecyc.dat. Pick one to keep it."),
             ],
             SettingsTab::Gameplay => vec![
                 ("Look sensitivity", format!("{:.1}", s.sensitivity), "Adjusts mouse and right-stick camera movement."),
@@ -519,6 +520,17 @@ impl Menu {
                     (Some(23), false) | (Some(0), true) => None,
                     (Some(hour), false) => Some(hour + 1),
                     (Some(hour), true) => Some(hour - 1),
+                };
+            }
+            (SettingsTab::Graphics, 15) => {
+                let count = crate::settings::WEATHER_NAMES.len() as u8;
+                s.fixed_weather = match (s.fixed_weather, left) {
+                    (None, false) => Some(0),
+                    (None, true) => Some(count - 1),
+                    (Some(w), false) if w + 1 == count => None,
+                    (Some(0), true) => None,
+                    (Some(w), false) => Some(w + 1),
+                    (Some(w), true) => Some(w - 1),
                 };
             }
             (SettingsTab::Graphics, 14) => {

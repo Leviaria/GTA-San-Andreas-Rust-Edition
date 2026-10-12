@@ -31,12 +31,18 @@ live and persist, except renderer and texture-filter changes which require resta
   shaders (skipped without a GPU adapter; lavapipe works).
 - Day/night cycle: one game minute per real second, starting at 12:00, with a
   clock in the HUD. Graphics → Time of day can fix any hour instead. Sky,
-  haze, sun colour and night darkening come from the first weather block
-  (extra sunny Los Santos) of the player's own `data/timecyc.dat`, with
-  built-in colours if it cannot be read. The sun rises in the east at 06:00
+  haze, sun colour and night darkening come from the player's own
+  `data/timecyc.dat`, with built-in colours if it cannot be read. The sun rises in the east at 06:00
   and sets in the west at 20:00; a dimmer moon lights the night, and shadows
   fade around sunrise and sunset. Night darkening scales the day-baked prelit
   colours; SA's separate night vertex colours are not used yet.
+- Weather: every weather block in timecyc.dat is read. Every six game hours
+  the weather changes to one that fits the area the player is in (Los Santos,
+  San Fierro, Las Venturas, countryside or desert) and blends over one game
+  hour. Cloudy, rainy, foggy and sandstorm weathers thicken the haze and
+  soften sunlight and shadows; rain adds falling streaks around the camera
+  (one draw call). Graphics → Weather can hold any weather. Weather is local
+  to each player and is not synchronised in multiplayer yet.
 - Night lights: street lamps and other 2DFX light records in the original
   models get additive coronas and soft light pools on the ground below them,
   fading in as daylight drops. The player's car gets headlight coronas and a

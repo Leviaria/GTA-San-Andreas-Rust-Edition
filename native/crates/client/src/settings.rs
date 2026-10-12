@@ -52,6 +52,8 @@ pub struct Settings {
     pub sun_shadows: bool,
     /// Fixed hour of day, or `None` for the running day/night cycle.
     pub fixed_hour: Option<u8>,
+    /// Fixed timecyc weather, or `None` for weather that changes by area.
+    pub fixed_weather: Option<u8>,
     pub fsr1: bool,
     pub renderer: Renderer,
     pub fps_limit: u32,
@@ -86,6 +88,7 @@ impl Default for Settings {
             sun_lighting: 0.35,
             sun_shadows: true,
             fixed_hour: None,
+            fixed_weather: None,
             fsr1: true,
             renderer: Renderer::Auto,
             fps_limit: 0,
@@ -96,6 +99,29 @@ impl Default for Settings {
         }
     }
 }
+/// San Andreas weathers in timecyc.dat order, as the game's files name them.
+pub const WEATHER_NAMES: [&str; 20] = [
+    "Extra sunny (Los Santos)",
+    "Sunny (Los Santos)",
+    "Extra sunny smog (Los Santos)",
+    "Sunny smog (Los Santos)",
+    "Cloudy (Los Santos)",
+    "Sunny (San Fierro)",
+    "Extra sunny (San Fierro)",
+    "Cloudy (San Fierro)",
+    "Rain (San Fierro)",
+    "Fog (San Fierro)",
+    "Sunny (Las Venturas)",
+    "Extra sunny (Las Venturas)",
+    "Cloudy (Las Venturas)",
+    "Extra sunny (countryside)",
+    "Sunny (countryside)",
+    "Cloudy (countryside)",
+    "Rain (countryside)",
+    "Extra sunny (desert)",
+    "Sunny (desert)",
+    "Sandstorm (desert)",
+];
 impl Settings {
     pub fn sanitize(&mut self) {
         let defaults = Self::default();
@@ -105,6 +131,12 @@ impl Settings {
         }
         if self.fixed_hour.is_some_and(|hour| hour > 23) {
             self.fixed_hour = None;
+        }
+        if self
+            .fixed_weather
+            .is_some_and(|weather| usize::from(weather) >= WEATHER_NAMES.len())
+        {
+            self.fixed_weather = None;
         }
         if ![0, 30, 60, 90, 120, 144, 165, 240].contains(&self.fps_limit) {
             self.fps_limit = 0;
