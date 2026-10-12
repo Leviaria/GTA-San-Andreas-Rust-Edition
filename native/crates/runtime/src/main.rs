@@ -300,14 +300,10 @@ impl State {
             return;
         };
         match sa_scene::load_car_model(&self.resource_game_dir, &model) {
-            Ok(scene) => {
-                let previous = self.car.take();
-                match self.install_car(scene) {
-                    Ok(()) => self.car_catalog[index] = self.car.take(),
-                    Err(e) => eprintln!("Vehicle {model} upload failed: {e:#}"),
-                }
-                self.car = previous;
-            }
+            Ok(scene) => match self.build_car(scene) {
+                Ok(entry) => self.car_catalog[index] = Some(entry),
+                Err(e) => eprintln!("Vehicle {model} upload failed: {e:#}"),
+            },
             Err(e) => eprintln!("Vehicle {model} unavailable: {e:#}"),
         }
     }
@@ -342,7 +338,10 @@ impl State {
             Err(e) => eprintln!("Ped {model} unavailable: {e:#}"),
         }
     }
-    fn install_car(&mut self, scene: Scene) -> Result<()> {
+    /// Upload a car model without touching the player's own car. Loading a
+    /// catalog model (for traffic, a peer or the menu) must not seat or eject
+    /// the player.
+    fn build_car(&self, scene: Scene) -> Result<(sa_scene::vehicle::Car, Vec<GpuBatch>)> {
         let handling = scene.vehicle_handling;
         let clearance = -scene
             .batches
@@ -358,10 +357,13 @@ impl State {
             &self.mipmaps,
             scene,
         )?;
-        self.car = Some((
+        Ok((
             sa_scene::vehicle::Car::new(Vec3::ZERO, clearance).with_handling(handling),
             batches,
-        ));
+        ))
+    }
+    fn install_car(&mut self, scene: Scene) -> Result<()> {
+        self.car = Some(self.build_car(scene)?);
         self.car_render_pose = None;
         self.place_car();
         self.driving = false;
@@ -2760,15 +2762,13 @@ impl ApplicationHandler for App {
                 state.menu.cars = vec![self.initial_models.0.clone()];
                 state.menu.peds = vec![self.initial_models.1.clone()];
                 for (name, scene) in std::mem::take(&mut self.car_catalog) {
-                    let previous = state.car.take();
-                    match state.install_car(scene) {
-                        Ok(()) => {
-                            state.car_catalog.push(state.car.take());
+                    match state.build_car(scene) {
+                        Ok(entry) => {
+                            state.car_catalog.push(Some(entry));
                             state.menu.cars.push(name);
                         }
                         Err(e) => eprintln!("Catalog upload failed: {e:#}"),
                     }
-                    state.car = previous;
                 }
                 state.original_car_models = original_car_names(&self.game_dir);
                 append_originals(
