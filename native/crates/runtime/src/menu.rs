@@ -363,6 +363,8 @@ pub struct Menu {
     pub zone: Option<String>,
     /// Area last announced, and when (egui time) it changed.
     zone_announced: (Option<String>, f64),
+    /// Held gun: name, rounds loaded, spare rounds, aiming, reloading.
+    pub weapon_hud: Option<(String, u32, u32, bool, bool)>,
     pub ride_status: String,
     pub network_players: Vec<String>,
     pub network_active: bool,
@@ -736,6 +738,7 @@ impl Menu {
             clock: (12, 0),
             zone: None,
             zone_announced: (None, f64::NEG_INFINITY),
+            weapon_hud: None,
             ride_status: String::new(),
             network_players: Vec::new(),
             network_active: false,
@@ -1146,6 +1149,48 @@ impl Menu {
                                     });
                                 });
                         });
+                }
+            }
+            if let (true, Some((name, loaded, spare, aiming, reloading))) =
+                (self.settings.show_hud, &self.weapon_hud)
+            {
+                // San Andreas shows the gun and its ammo in the top right.
+                egui::Area::new("freeroam-weapon".into())
+                    .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-30.0, 30.0 * scale))
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                            outlined_text(
+                                ui,
+                                name,
+                                FontId::new(22.0 * scale, FontFamily::Proportional),
+                                WHITE,
+                            );
+                            let ammo = if *reloading {
+                                "RELOADING".to_owned()
+                            } else {
+                                format!("{loaded} - {spare}")
+                            };
+                            outlined_text(
+                                ui,
+                                &ammo,
+                                FontId::new(20.0 * scale, FontFamily::Proportional),
+                                Color32::from_rgb(160, 200, 255),
+                            );
+                        });
+                    });
+                if *aiming {
+                    let center = screen.center();
+                    let painter = ctx.layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        "freeroam-crosshair".into(),
+                    ));
+                    let stroke = egui::Stroke::new(2.0 * scale, Color32::WHITE);
+                    for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                        let near = center + Vec2::new(dx, dy) * 5.0 * scale;
+                        let far = center + Vec2::new(dx, dy) * 14.0 * scale;
+                        painter.line_segment([near, far], stroke);
+                    }
                 }
             }
             if self.settings.show_hud && self.settings.show_speedometer {

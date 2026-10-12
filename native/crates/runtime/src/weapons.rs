@@ -1,0 +1,251 @@
+//! Guns the player carries: choosing one, firing, reloading, and what a shot
+//! hits. Damage, range and clip size come from the player's own weapon.dat.
+use super::State;
+use glam::Vec3;
+use sa_scene::weapon_list::Weapon;
+
+/// Seconds a reload takes.
+const RELOAD: f32 = 1.4;
+/// Clips of spare ammunition each gun starts with.
+const SPARE_CLIPS: u32 = 8;
+/// Shotgun pellet spread, as a fraction of the aim direction.
+const SPREAD: f32 = 0.06;
+
+#[derive(Clone, Debug)]
+pub struct Held {
+    pub weapon: Weapon,
+    pub loaded: u32,
+    pub spare: u32,
+}
+
+#[derive(Default)]
+pub struct Arsenal {
+    pub guns: Vec<Held>,
+    /// Index into `guns`, or `None` for bare fists.
+    pub current: Option<usize>,
+    cooldown: f32,
+    reloading: f32,
+}
+
+/// What a trigger pull did this frame.
+#[derive(Debug, PartialEq)]
+pub enum Shot {
+    None,
+    Fired,
+    Empty,
+}
+
+impl Arsenal {
+    pub fn stocked(guns: Vec<Weapon>) -> Self {
+        Self {
+            guns: guns
+                .into_iter()
+                .map(|weapon| Held {
+                    loaded: weapon.clip,
+                    spare: weapon.clip * SPARE_CLIPS,
+                    weapon,
+                })
+                .collect(),
+            ..Self::default()
+        }
+    }
+    pub fn held(&self) -> Option<&Held> {
+        self.current.and_then(|index| self.guns.get(index))
+    }
+    pub fn reloading(&self) -> bool {
+        self.reloading > 0.0
+    }
+    /// Step through fists and every gun, wrapping around.
+    pub fn cycle(&mut self, forward: bool) {
+        let count = self.guns.len() + 1;
+        let position = self.current.map_or(0, |index| index + 1);
+        let next = if forward {
+            (position + 1) % count
+        } else {
+            (position + count - 1) % count
+        };
+        self.current = next.checked_sub(1);
+        self.reloading = 0.0;
+        self.cooldown = self.cooldown.max(0.25);
+    }
+    pub fn refill(&mut self) {
+        for held in &mut self.guns {
+            held.loaded = held.weapon.clip;
+            held.spare = held.weapon.clip * SPARE_CLIPS;
+        }
+    }
+    /// Advance timers and fire if the trigger is held and the gun is ready.
+    pub fn update(&mut self, trigger: bool, dt: f32) -> Shot {
+        self.cooldown = (self.cooldown - dt).max(0.0);
+        if self.reloading > 0.0 {
+            self.reloading -= dt;
+            if self.reloading <= 0.0 {
+                self.reloading = 0.0;
+                if let Some(held) = self.current.and_then(|index| self.guns.get_mut(index)) {
+                    let take = (held.weapon.clip - held.loaded).min(held.spare);
+                    held.loaded += take;
+                    held.spare -= take;
+                }
+            }
+            return Shot::None;
+        }
+        let Some(index) = self.current else {
+            return Shot::None;
+        };
+        if !trigger || self.cooldown > 0.0 {
+            return Shot::None;
+        }
+        let held = &mut self.guns[index];
+        if held.loaded == 0 {
+            self.cooldown = 0.3;
+            if held.spare > 0 {
+                self.reloading = RELOAD;
+            }
+            return Shot::Empty;
+        }
+        held.loaded -= 1;
+        self.cooldown = held.weapon.interval();
+        if held.loaded == 0 && held.spare > 0 {
+            self.reloading = RELOAD;
+        }
+        Shot::Fired
+    }
+}
+
+/// Directions for each pellet of a shot: straight for most guns, a fixed
+/// cone for shotguns so the spread is the same every time.
+pub fn pellet_directions(aim: Vec3, pellets: u32) -> Vec<Vec3> {
+    if pellets <= 1 {
+        return vec![aim];
+    }
+    let right = aim.cross(Vec3::Y).normalize_or(Vec3::X);
+    let up = right.cross(aim).normalize_or(Vec3::Y);
+    (0..pellets)
+        .map(|i| {
+            let angle = i as f32 / pellets as f32 * std::f32::consts::TAU;
+            let ring = if i % 2 == 0 { SPREAD } else { SPREAD * 0.5 };
+            (aim + (right * angle.cos() + up * angle.sin()) * ring).normalize()
+        })
+        .collect()
+}
+
+impl State {
+    pub(super) fn update_weapons(&mut self, dt: f32) {
+        if self.arsenal.guns.is_empty() && !self.arsenal_loaded {
+            self.arsenal_loaded = true;
+            self.arsenal = Arsenal::stocked(sa_scene::weapon_list::original_guns(
+                &self.resource_game_dir,
+            ));
+        }
+        let on_foot = self.walking && !self.driving && self.menu.page.is_none();
+        let trigger = on_foot && self.captured && self.fire_held;
+        let shot = self.arsenal.update(trigger, dt);
+        self.menu.weapon_hud = self.arsenal.held().filter(|_| on_foot).map(|held| {
+            (
+                held.weapon.label(),
+                held.loaded,
+                held.spare,
+                self.aim_held,
+                self.arsenal.reloading(),
+            )
+        });
+        if shot != Shot::Fired {
+            return;
+        }
+        let Some(held) = self.arsenal.held() else {
+            return;
+        };
+        let (damage, range, pellets) =
+            (held.weapon.damage, held.weapon.range, held.weapon.pellets());
+        let origin = self.position;
+        let aim = Vec3::new(
+            self.yaw.sin() * self.pitch.cos(),
+            self.pitch.sin(),
+            self.yaw.cos() * self.pitch.cos(),
+        );
+        let muzzle = self
+            .player
+            .as_ref()
+            .map_or(origin, |player| player.feet + Vec3::Y * 1.4);
+        self.crowd.scare(muzzle);
+        for direction in pellet_directions(aim, pellets) {
+            // Walls stop bullets: shorten the ray to the first solid thing.
+            let end = origin + direction * range;
+            let reach = self.collision.as_ref().map_or(range, |world| {
+                world.clip_camera(origin, end).distance(origin)
+            });
+            if let Some((index, _)) = self.crowd.first_hit(origin, direction, reach) {
+                self.crowd.damage(index, damage);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pistol() -> Weapon {
+        Weapon {
+            name: "PISTOL".into(),
+            range: 35.0,
+            model: 346,
+            slot: 2,
+            group: "colt45".into(),
+            clip: 3,
+            damage: 25.0,
+        }
+    }
+
+    #[test]
+    fn cycling_goes_through_fists_and_every_gun() {
+        let mut arsenal = Arsenal::stocked(vec![pistol(), pistol()]);
+        assert!(arsenal.held().is_none());
+        arsenal.cycle(true);
+        assert_eq!(arsenal.current, Some(0));
+        arsenal.cycle(true);
+        arsenal.cycle(true);
+        assert_eq!(arsenal.current, None, "wraps back to fists");
+        arsenal.cycle(false);
+        assert_eq!(arsenal.current, Some(1));
+    }
+
+    #[test]
+    fn firing_respects_the_rate_empties_the_clip_and_reloads() {
+        let mut arsenal = Arsenal::stocked(vec![pistol()]);
+        assert_eq!(arsenal.update(true, 0.1), Shot::None, "fists do not shoot");
+        arsenal.cycle(true);
+        arsenal.update(false, 1.0);
+        assert_eq!(arsenal.update(true, 0.01), Shot::Fired);
+        assert_eq!(arsenal.update(true, 0.01), Shot::None, "too soon");
+        let mut shots = 1;
+        for _ in 0..200 {
+            if arsenal.update(true, 0.05) == Shot::Fired {
+                shots += 1;
+            }
+            if arsenal.reloading() {
+                break;
+            }
+        }
+        assert_eq!(shots, 3, "one clip");
+        assert_eq!(arsenal.held().unwrap().loaded, 0);
+        for _ in 0..40 {
+            arsenal.update(false, 0.05);
+        }
+        let held = arsenal.held().unwrap();
+        assert_eq!(held.loaded, 3);
+        assert_eq!(held.spare, 3 * SPARE_CLIPS - 3);
+    }
+
+    #[test]
+    fn shotgun_pellets_spread_around_the_aim() {
+        let aim = Vec3::new(0.0, 0.0, 1.0);
+        let pellets = pellet_directions(aim, 8);
+        assert_eq!(pellets.len(), 8);
+        assert!(pellets
+            .iter()
+            .all(|p| p.dot(aim) > 0.99 && (p.length() - 1.0).abs() < 1e-4));
+        assert!(pellets.iter().any(|p| p.x > 0.01) && pellets.iter().any(|p| p.x < -0.01));
+        assert_eq!(pellet_directions(aim, 1), vec![aim]);
+    }
+}

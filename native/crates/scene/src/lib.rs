@@ -12,6 +12,7 @@ mod texture;
 pub mod vehicle;
 pub mod vehicle_list;
 pub mod water;
+pub mod weapon_list;
 use anyhow::{ensure, Context, Result};
 use sa_assets::{decode_dff, decode_txd, Geometry, Img, Texture};
 use std::{
