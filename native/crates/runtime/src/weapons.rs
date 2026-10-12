@@ -212,10 +212,15 @@ impl State {
 
     pub(super) fn update_weapons(&mut self, dt: f32) {
         if self.arsenal.guns.is_empty() && !self.arsenal_loaded {
-            self.arsenal_loaded = true;
-            self.arsenal = Arsenal::stocked(sa_scene::weapon_list::original_guns(
-                &self.resource_game_dir,
-            ));
+            let guns = sa_scene::weapon_list::original_guns(&self.resource_game_dir);
+            // Keep trying until the install is known; an empty first read
+            // used to leave the player with fists for the whole session.
+            if !guns.is_empty() || !self.resource_game_dir.as_os_str().is_empty() {
+                eprintln!("Loaded {} guns from weapon.dat", guns.len());
+                self.arsenal_loaded = true;
+                self.arsenal = Arsenal::stocked(guns);
+                self.arsenal.cycle(true);
+            }
         }
         let on_foot = self.walking && !self.driving && self.menu.page.is_none();
         let trigger = on_foot && self.captured && self.fire_held;
