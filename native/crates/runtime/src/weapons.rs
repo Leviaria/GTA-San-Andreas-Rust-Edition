@@ -133,6 +133,22 @@ pub fn pellet_directions(aim: Vec3, pellets: u32) -> Vec<Vec3> {
 const RIGHT_HAND: i32 = 24;
 
 impl State {
+    /// A gunshot for `group`, or the reload click for `None`, at `at`.
+    fn play_weapon_sound(&mut self, group: Option<&str>, at: Vec3) {
+        let (Some(audio), Some(sounds)) = (&mut self.audio, &self.gameplay_audio.sounds) else {
+            return;
+        };
+        let sound = match group {
+            Some(group) => sounds.gunshot(group),
+            None => sounds.reload(),
+        };
+        if let Some(sound) = sound {
+            if let Err(error) = audio.play_spatial(sound, at.to_array()) {
+                eprintln!("Weapon sound unavailable: {error:#}");
+            }
+        }
+    }
+
     /// Draw the held gun in CJ's right hand, following the current clip.
     pub(super) fn pose_held_gun(&mut self) {
         self.gun_drawn = None;
@@ -203,7 +219,15 @@ impl State {
         }
         let on_foot = self.walking && !self.driving && self.menu.page.is_none();
         let trigger = on_foot && self.captured && self.fire_held;
+        let was_reloading = self.arsenal.reloading();
         let shot = self.arsenal.update(trigger, dt);
+        let muzzle_at = self
+            .player
+            .as_ref()
+            .map_or(self.position, |player| player.feet + Vec3::Y * 1.4);
+        if !was_reloading && self.arsenal.reloading() {
+            self.play_weapon_sound(None, muzzle_at);
+        }
         self.menu.weapon_hud = self.arsenal.held().filter(|_| on_foot).map(|held| {
             (
                 held.weapon.label(),
@@ -227,11 +251,9 @@ impl State {
             self.pitch.sin(),
             self.yaw.cos() * self.pitch.cos(),
         );
-        let muzzle = self
-            .player
-            .as_ref()
-            .map_or(origin, |player| player.feet + Vec3::Y * 1.4);
-        self.crowd.scare(muzzle);
+        let group = held.weapon.group.clone();
+        self.play_weapon_sound(Some(&group), muzzle_at);
+        self.crowd.scare(muzzle_at);
         for direction in pellet_directions(aim, pellets) {
             // Walls stop bullets: shorten the ray to the first solid thing.
             let end = origin + direction * range;
