@@ -629,7 +629,8 @@ impl State {
             if let Some(index) = changed {
                 let id = self.remote_actors[index].id;
                 if let Some(peer) = report.peers.iter().find(|p| p.id == id) {
-                    if let Some((_, car)) = self.appearance_indices(peer.pose) {
+                    if let Some((ped, car)) = self.appearance_indices(peer.pose) {
+                        self.ensure_ped_loaded(ped);
                         self.ensure_car_loaded(car);
                     }
                     if let Some(mut actor) = self.make_remote(peer) {
@@ -641,7 +642,8 @@ impl State {
             } else if let Some(peer) = report.peers.iter().find(|p| {
                 p.id != report.local_id && !self.remote_actors.iter().any(|a| a.id == p.id)
             }) {
-                if let Some((_, car)) = self.appearance_indices(peer.pose) {
+                if let Some((ped, car)) = self.appearance_indices(peer.pose) {
+                    self.ensure_ped_loaded(ped);
                     self.ensure_car_loaded(car);
                 }
                 if let Some(actor) = self.make_remote(peer) {

@@ -183,6 +183,8 @@ struct State {
     /// Menu name to gta3.img model for cars loaded on first use.
     original_car_models: std::collections::HashMap<String, String>,
     ped_catalog: Vec<Option<(sa_scene::ped::Ped, Vec<GpuBatch>)>>,
+    /// Menu name to gta3.img model for peds loaded on first use.
+    original_ped_models: std::collections::HashMap<String, String>,
     spawned_peds: Vec<SpawnedPed>,
     npc_seconds: f32,
     network_session: Option<sa_net::Session>,
@@ -276,6 +278,37 @@ impl State {
                 self.car = previous;
             }
             Err(e) => eprintln!("Vehicle {model} unavailable: {e:#}"),
+        }
+    }
+    /// Load an original ped the first time it is needed, like `ensure_car_loaded`.
+    fn ensure_ped_loaded(&mut self, index: usize) {
+        if index == self.active_ped || !matches!(self.ped_catalog.get(index), Some(None)) {
+            return;
+        }
+        let Some(model) = self
+            .menu
+            .peds
+            .get(index)
+            .and_then(|name| self.original_ped_models.get(name))
+            .cloned()
+        else {
+            return;
+        };
+        let loaded =
+            sa_scene::ped::Ped::load_model(&self.resource_game_dir, &model).and_then(|ped| {
+                let batches = Self::upload_scene(
+                    &self.device,
+                    &self.queue,
+                    &self.image_layout,
+                    &self.sampler,
+                    &self.mipmaps,
+                    ped.scene()?,
+                )?;
+                Ok((ped, batches))
+            });
+        match loaded {
+            Ok(entry) => self.ped_catalog[index] = Some(entry),
+            Err(e) => eprintln!("Ped {model} unavailable: {e:#}"),
         }
     }
     fn install_car(&mut self, scene: Scene) -> Result<()> {
@@ -781,6 +814,7 @@ impl State {
             car_catalog: vec![None],
             original_car_models: std::collections::HashMap::new(),
             ped_catalog: vec![None],
+            original_ped_models: std::collections::HashMap::new(),
             spawned_peds: Vec::new(),
             npc_seconds: 0.0,
             network_session: None,
@@ -1633,6 +1667,7 @@ impl State {
         }
     }
     fn spawn_ped(&mut self, index: usize) -> Result<()> {
+        self.ensure_ped_loaded(index);
         anyhow::ensure!(
             self.spawned_peds.len() < 8,
             "At most 8 spawned peds. Remove some first."
@@ -1821,6 +1856,7 @@ impl State {
             },
             Some(menu::Action::ClearPeds) => self.spawned_peds.clear(),
             Some(menu::Action::Ped(index)) => {
+                self.ensure_ped_loaded(index);
                 if index < self.ped_catalog.len() {
                     if index != self.active_ped {
                         if let Some(next) = self.ped_catalog[index].take() {
@@ -2554,7 +2590,7 @@ impl ApplicationHandler for App {
                     state.car = previous;
                 }
                 state.original_car_models = original_car_names(&self.game_dir);
-                append_original_cars(
+                append_originals(
                     &mut state.car_catalog,
                     &mut state.menu.cars,
                     &state.original_car_models,
@@ -2577,6 +2613,12 @@ impl ApplicationHandler for App {
                         Err(e) => eprintln!("Catalog ped upload failed: {e:#}"),
                     }
                 }
+                state.original_ped_models = original_ped_names(&self.game_dir);
+                append_originals(
+                    &mut state.ped_catalog,
+                    &mut state.menu.peds,
+                    &state.original_ped_models,
+                );
                 state.driving = false;
                 state.progress_path = self.progress_path.take();
                 if let Some(save) = self.initial_progress.take() {
@@ -3966,6 +4008,19 @@ fn original_car_names(game: &std::path::Path) -> std::collections::HashMap<Strin
     }
     names
 }
+/// Every ped in the player's peds.ide, named by group and model. The three
+/// story peds the catalog already loads (see `additional_original_ped_models`)
+/// are left out.
+fn original_ped_names(game: &std::path::Path) -> std::collections::HashMap<String, String> {
+    sa_scene::ped_list::original_peds(game)
+        .into_iter()
+        .filter(|ped| !matches!(ped.model.as_str(), "fam1" | "fam2" | "ballas1"))
+        .map(|ped| {
+            let label = sa_scene::ped_list::kind_label(&ped.kind);
+            (format!("{label} ({})", ped.model), ped.model)
+        })
+        .collect()
+}
 fn title_case(model: &str) -> String {
     let mut chars = model.chars();
     chars
@@ -3975,7 +4030,7 @@ fn title_case(model: &str) -> String {
 }
 /// Add every original car not already in the menu, sorted by name, as an
 /// empty slot that `ensure_car_loaded` fills on first use.
-fn append_original_cars<T>(
+fn append_originals<T>(
     catalog: &mut Vec<Option<T>>,
     menu: &mut Vec<String>,
     originals: &std::collections::HashMap<String, String>,

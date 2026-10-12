@@ -411,12 +411,17 @@ impl State {
         std::mem::swap(&mut self.menu.cars, &mut world.cars);
         std::mem::swap(&mut self.menu.peds, &mut world.peds);
         std::mem::swap(&mut self.menu.clothes, &mut world.clothes);
-        // Every client lists the original cars after the session's own, so the
+        // Every client lists the original cars and peds after the session's own, so the
         // indices peers send name the same car.
-        crate::append_original_cars(
+        crate::append_originals(
             &mut self.car_catalog,
             &mut self.menu.cars,
             &self.original_car_models,
+        );
+        crate::append_originals(
+            &mut self.ped_catalog,
+            &mut self.menu.peds,
+            &self.original_ped_models,
         );
         crate::metrics::session_memory("world swap");
         self.keys.clear();

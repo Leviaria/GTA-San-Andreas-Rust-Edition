@@ -5,6 +5,7 @@ pub mod lights;
 mod mods;
 pub use mods::{share_resource_folders, share_resources};
 pub mod ped;
+pub mod ped_list;
 pub mod roads;
 mod roadsign;
 mod texture;
