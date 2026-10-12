@@ -31,6 +31,7 @@ mod skids;
 mod streaming;
 mod traffic;
 mod upload;
+mod weapons;
 mod zones;
 use streaming::{Streamer, ORIGIN, RADIUS};
 use wgpu::util::DeviceExt;
@@ -227,6 +228,11 @@ struct State {
     offline_world: Option<session_resources::World>,
     remote_actors: Vec<multiplayer::RemoteActor>,
     traffic: traffic::Traffic,
+    arsenal: weapons::Arsenal,
+    arsenal_loaded: bool,
+    /// Left and right mouse buttons: fire and aim.
+    fire_held: bool,
+    aim_held: bool,
     crowd: crowd::Crowd,
     crowd_meshes: Vec<crowd::WalkerMesh>,
     /// Ped catalog indices pedestrians may use, and the catalog size they were built for.
@@ -872,6 +878,10 @@ impl State {
             offline_world: None,
             remote_actors: Vec::new(),
             traffic: traffic::Traffic::default(),
+            arsenal: weapons::Arsenal::default(),
+            arsenal_loaded: false,
+            fire_held: false,
+            aim_held: false,
             crowd: crowd::Crowd::default(),
             crowd_meshes: Vec::new(),
             crowd_models: Vec::new(),
@@ -1501,6 +1511,7 @@ impl State {
         self.update_network();
         self.update_traffic(dt);
         self.update_crowd(dt);
+        self.update_weapons(dt);
         let camera_time = self.animation.as_ref().and_then(|cut| {
             let keys = cut.camera_keys.as_ref()?;
             let duration = keys.last().unwrap().seconds.max(0.01);
@@ -1702,6 +1713,7 @@ impl State {
     }
     fn respawn(&mut self) {
         self.leave_passenger();
+        self.arsenal.refill();
         self.driving = false;
         self.spawned_peds.clear();
         // Recover on loaded ground rather than teleporting into an unloaded map.
@@ -3847,12 +3859,36 @@ impl ApplicationHandler for App {
                 state.window.request_redraw();
             }
             WindowEvent::MouseInput {
-                button: MouseButton::Left,
-                state: ElementState::Pressed,
+                button,
+                state: pressed,
                 ..
-            } => state.capture(true),
+            } => {
+                let down = pressed == ElementState::Pressed;
+                match button {
+                    MouseButton::Left => {
+                        // The first click only grabs the mouse; later ones shoot.
+                        state.fire_held = down && state.captured;
+                        if down {
+                            state.capture(true);
+                        }
+                    }
+                    MouseButton::Right => state.aim_held = down,
+                    _ => {}
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if state.captured => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                if lines.abs() >= 0.5 && state.walking && !state.driving {
+                    state.arsenal.cycle(lines < 0.0);
+                }
+            }
             WindowEvent::Focused(false) => {
                 state.capture(false);
+                state.fire_held = false;
+                state.aim_held = false;
                 state.keys.clear();
                 if !self.smoke && state.streamer.is_some() && state.menu.page.is_none() {
                     state.menu.open(menu::Page::Pause);

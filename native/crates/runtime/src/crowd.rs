@@ -33,7 +33,22 @@ pub struct Walker {
     pace: f32,
     pub feet: Vec3,
     pub yaw: f32,
+    pub health: f32,
+    /// Seconds since this walker died, if it has.
+    pub dead_for: Option<f32>,
+    /// Seconds left running away after gunfire nearby.
+    pub panic: f32,
 }
+
+/// Running pace while fleeing.
+const FLEE: f32 = 4.5;
+/// How long a body stays before it is cleared away.
+const BODY_SECONDS: f32 = 20.0;
+/// People this close to gunfire run.
+const HEARING: f32 = 30.0;
+/// Rough body size for hits: a vertical capsule.
+const BODY_HEIGHT: f32 = 1.8;
+const BODY_RADIUS: f32 = 0.4;
 
 #[derive(Default)]
 pub struct Crowd {
@@ -67,10 +82,18 @@ impl Crowd {
         limit: usize,
         dt: f32,
     ) -> Option<usize> {
-        self.walkers.retain(|w| w.feet.distance(player) < DESPAWN);
+        self.walkers.retain(|w| {
+            w.feet.distance(player) < DESPAWN && w.dead_for.is_none_or(|t| t < BODY_SECONDS)
+        });
         self.walkers.truncate(limit);
         let positions: Vec<Vec3> = self.walkers.iter().map(|w| w.feet).collect();
         for (index, walker) in self.walkers.iter_mut().enumerate() {
+            if let Some(dead) = &mut walker.dead_for {
+                *dead += dt;
+                walker.speed = 0.0;
+                continue;
+            }
+            walker.panic = (walker.panic - dt).max(0.0);
             let forward = Vec3::new(walker.yaw.sin(), 0.0, walker.yaw.cos());
             let ahead = |point: Vec3| {
                 let offset = point - walker.feet;
@@ -85,7 +108,13 @@ impl Crowd {
                     .iter()
                     .enumerate()
                     .any(|(other, &p)| other != index && ahead(p));
-            walker.speed = if waiting { 0.0 } else { walker.pace };
+            walker.speed = if walker.panic > 0.0 {
+                FLEE
+            } else if waiting {
+                0.0
+            } else {
+                walker.pace
+            };
             walker.along += walker.speed * dt;
             let mut guard = 0;
             while walker.along >= length(paths, walker.from, walker.to) && guard < 8 {
@@ -137,6 +166,9 @@ impl Crowd {
             pace,
             feet: Vec3::ZERO,
             yaw: 0.0,
+            health: 100.0,
+            dead_for: None,
+            panic: 0.0,
         };
         place(&mut walker, paths);
         if self
@@ -149,6 +181,76 @@ impl Crowd {
         self.walkers.push(walker);
         Some(self.walkers.len() - 1)
     }
+
+    /// The nearest living walker a ray hits within `range`, and how far along
+    /// the ray the hit is.
+    pub fn first_hit(&self, origin: Vec3, direction: Vec3, range: f32) -> Option<(usize, f32)> {
+        self.walkers
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.dead_for.is_none())
+            .filter_map(|(index, w)| {
+                ray_capsule(origin, direction, w.feet, BODY_HEIGHT, BODY_RADIUS)
+                    .filter(|&t| t <= range)
+                    .map(|t| (index, t))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// Apply a hit. Returns true when it killed.
+    pub fn damage(&mut self, index: usize, amount: f32) -> bool {
+        let Some(walker) = self.walkers.get_mut(index) else {
+            return false;
+        };
+        if walker.dead_for.is_some() {
+            return false;
+        }
+        walker.health -= amount;
+        walker.panic = 10.0;
+        if walker.health <= 0.0 {
+            walker.dead_for = Some(0.0);
+            walker.speed = 0.0;
+            return true;
+        }
+        false
+    }
+
+    /// Everyone within earshot of a shot runs for a while.
+    pub fn scare(&mut self, at: Vec3) {
+        for walker in &mut self.walkers {
+            if walker.dead_for.is_none() && walker.feet.distance(at) < HEARING {
+                walker.panic = walker.panic.max(8.0);
+            }
+        }
+    }
+}
+
+/// Distance along a ray (unit `direction`) to a vertical capsule standing on
+/// `feet`, if it hits.
+fn ray_capsule(origin: Vec3, direction: Vec3, feet: Vec3, height: f32, radius: f32) -> Option<f32> {
+    let a = feet + Vec3::Y * radius;
+    let b = feet + Vec3::Y * (height - radius);
+    let axis = b - a;
+    // Closest points between the ray and the capsule's axis segment.
+    let w = origin - a;
+    let (dd, da, aa) = (
+        direction.dot(direction),
+        direction.dot(axis),
+        axis.dot(axis),
+    );
+    let (dw, aw) = (direction.dot(w), axis.dot(w));
+    let denominator = dd * aa - da * da;
+    let mut s = if denominator.abs() > 1e-6 {
+        ((da * aw - aa * dw) / denominator).max(0.0)
+    } else {
+        0.0
+    };
+    let mut u = ((da * s + aw) / aa).clamp(0.0, 1.0);
+    s = ((u * da - dw) / dd).max(0.0);
+    u = ((da * s + aw) / aa).clamp(0.0, 1.0);
+    let closest = origin + direction * s;
+    let distance = closest.distance(a + axis * u);
+    (distance <= radius).then(|| (s - (radius * radius - distance * distance).sqrt()).max(0.0))
 }
 
 fn length(paths: &RoadGraph, from: u32, to: u32) -> f32 {
@@ -260,23 +362,33 @@ impl State {
             let Some((ped, _)) = source else { continue };
             // Offset each walker's clock so a crowd does not step in unison.
             let time = seconds + (walker.id % 17) as f32 * 0.13;
-            let posed = if walker.speed > 0.0 {
+            let posed = if walker.dead_for.is_some() {
+                ped.frame("idle_stance", 0.0)
+            } else if walker.speed > 2.5 {
+                ped.frame("run_civi", time)
+                    .or_else(|_| ped.frame("run_player", time))
+            } else if walker.speed > 0.0 {
                 ped.frame("walk_civi", time)
                     .or_else(|_| ped.frame("walk_player", time))
             } else {
                 ped.frame("idle_stance", time)
             };
             let Ok(posed) = posed else { continue };
-            let rotation = Quat::from_rotation_y(walker.yaw + std::f32::consts::PI);
+            let mut rotation = Quat::from_rotation_y(walker.yaw + std::f32::consts::PI);
+            let mut feet = walker.feet;
+            if let Some(dead) = walker.dead_for {
+                // Topple backwards over half a second and lie on the ground.
+                let fall = (dead / 0.5).min(1.0) * std::f32::consts::FRAC_PI_2;
+                rotation *= Quat::from_rotation_x(fall);
+                feet += Vec3::Y * 0.15 * (fall / std::f32::consts::FRAC_PI_2);
+            }
             for (part, batch) in posed.iter().zip(&mesh.batches) {
                 if part.vertices.len() * 9 != batch.base.len() {
                     continue;
                 }
                 let mut raw = Vec::with_capacity(part.vertices.len() * 9);
                 for vertex in &part.vertices {
-                    raw.extend(
-                        (rotation * Vec3::from_array(vertex.position) + walker.feet).to_array(),
-                    );
+                    raw.extend((rotation * Vec3::from_array(vertex.position) + feet).to_array());
                     raw.extend(vertex.uv);
                     raw.extend(vertex.color);
                 }
@@ -342,6 +454,42 @@ mod tests {
         crowd.update(&paths, Vec3::ZERO, &[blocker], &[1], 1, 0.1);
         assert_eq!(crowd.walkers[0].speed, 0.0);
         assert!(crowd.walkers[0].feet.distance(w.feet) < 1e-3);
+    }
+
+    #[test]
+    fn shots_hit_the_nearest_walker_and_kill_after_enough_damage() {
+        let paths = pavement();
+        let mut crowd = Crowd::default();
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 1.0);
+        let target = crowd.walkers[0].feet;
+        let origin = target + Vec3::new(-10.0, 1.5, 0.0);
+        let aim = (target + Vec3::Y * 1.2 - origin).normalize();
+        let (index, distance) = crowd.first_hit(origin, aim, 50.0).unwrap();
+        assert_eq!(index, 0);
+        assert!((9.0..10.0).contains(&distance), "{distance}");
+        assert!(crowd.first_hit(origin, aim, 5.0).is_none(), "out of range");
+        assert!(crowd.first_hit(origin, -aim, 50.0).is_none(), "behind");
+        assert!(!crowd.damage(0, 60.0));
+        assert!(crowd.walkers[0].panic > 0.0);
+        assert!(crowd.damage(0, 60.0));
+        assert!(
+            crowd.first_hit(origin, aim, 50.0).is_none(),
+            "bodies are not hit again"
+        );
+        let body = crowd.walkers[0].feet;
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 0.5);
+        assert_eq!(crowd.walkers[0].feet, body, "the dead do not walk");
+    }
+
+    #[test]
+    fn gunfire_makes_people_run() {
+        let paths = pavement();
+        let mut crowd = Crowd::default();
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 1.0);
+        let at = crowd.walkers[0].feet;
+        crowd.scare(at + Vec3::X * 5.0);
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 0.1);
+        assert_eq!(crowd.walkers[0].speed, FLEE);
     }
 
     #[test]
