@@ -22,7 +22,9 @@ pub struct RoadGraph {
 }
 
 struct Area {
-    /// (position, first link, link count, boat) per car node.
+    /// Index within the file of the first node in `nodes`.
+    first_id: usize,
+    /// (position, first link, link count, boat) per node.
     nodes: Vec<([f32; 3], usize, usize, bool)>,
     links: Vec<(u16, u16)>,
 }
@@ -34,7 +36,13 @@ fn u32at(data: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(data[at..at + 4].try_into().unwrap())
 }
 
+#[cfg(test)]
 fn parse_area(data: &[u8]) -> Result<Area> {
+    parse_area_of(data, false)
+}
+
+/// `peds` picks the pedestrian nodes, which follow the car nodes in each file.
+fn parse_area_of(data: &[u8], peds: bool) -> Result<Area> {
     ensure!(data.len() >= 20, "path file too short");
     let count = |index: usize| u32at(data, index * 4) as usize;
     let (nodes, cars, navis, links) = (count(0), count(1), count(3), count(4));
@@ -47,7 +55,9 @@ fn parse_area(data: &[u8]) -> Result<Area> {
         data.len() >= links_at + links * LINK_SIZE,
         "path file truncated"
     );
-    let cars = (0..cars)
+    let range = if peds { cars..nodes } else { 0..cars };
+    let first_id = range.start;
+    let cars = range
         .map(|index| {
             let row = &data[20 + index * NODE_SIZE..20 + (index + 1) * NODE_SIZE];
             let coordinate = |at: usize| i16::from_le_bytes([row[at], row[at + 1]]) as f32 / 8.0;
@@ -66,16 +76,22 @@ fn parse_area(data: &[u8]) -> Result<Area> {
             (u16at(data, at), u16at(data, at + 2))
         })
         .collect();
-    Ok(Area { nodes: cars, links })
+    Ok(Area {
+        first_id,
+        nodes: cars,
+        links,
+    })
 }
 
 fn build(areas: &[Option<Area>]) -> RoadGraph {
     let mut graph = RoadGraph::default();
     let mut index = HashMap::new();
     for (area_id, area) in areas.iter().enumerate() {
-        for (node_id, node) in area.iter().flat_map(|a| a.nodes.iter().enumerate()) {
+        let Some(area) = area else { continue };
+        for (node_id, node) in area.nodes.iter().enumerate() {
             if !node.3 {
-                index.insert((area_id as u16, node_id as u16), graph.nodes.len() as u32);
+                let id = (area.first_id + node_id) as u16;
+                index.insert((area_id as u16, id), graph.nodes.len() as u32);
                 graph.nodes.push(node.0);
             }
         }
@@ -84,7 +100,8 @@ fn build(areas: &[Option<Area>]) -> RoadGraph {
     for (area_id, area) in areas.iter().enumerate() {
         let Some(area) = area else { continue };
         for (node_id, &(_, first, count, _)) in area.nodes.iter().enumerate() {
-            let Some(&from) = index.get(&(area_id as u16, node_id as u16)) else {
+            let id = (area.first_id + node_id) as u16;
+            let Some(&from) = index.get(&(area_id as u16, id)) else {
                 continue;
             };
             for &(to_area, to_node) in area.links.iter().skip(first).take(count) {
@@ -116,18 +133,28 @@ impl PartialOrd for Open {
 impl RoadGraph {
     /// Read the car paths from the game installation.
     pub fn load(game: &Path) -> Result<Self> {
+        Self::load_kind(game, false)
+    }
+    /// Read the pedestrian paths (pavements, crossings, parks).
+    pub fn load_peds(game: &Path) -> Result<Self> {
+        Self::load_kind(game, true)
+    }
+    fn load_kind(game: &Path, peds: bool) -> Result<Self> {
         let mut archive = Img::open(&sa_assets::game_path::resolve(game, "models/gta3.img")?)?;
         let mut areas = Vec::with_capacity(AREAS as usize);
         for area in 0..AREAS {
             let name = format!("nodes{area}.dat");
             areas.push(if archive.has(&name) {
-                Some(parse_area(&archive.read(&name)?).with_context(|| format!("reading {name}"))?)
+                Some(
+                    parse_area_of(&archive.read(&name)?, peds)
+                        .with_context(|| format!("reading {name}"))?,
+                )
             } else {
                 None
             });
         }
         let graph = build(&areas);
-        ensure!(!graph.nodes.is_empty(), "no car paths in gta3.img");
+        ensure!(!graph.nodes.is_empty(), "no paths in gta3.img");
         Ok(graph)
     }
     /// A graph from explicit nodes and one-way links, for tests.
@@ -276,6 +303,22 @@ mod tests {
             vec![[0.0, 0.0], [0.0, 100.0], [100.0, 100.0], [100.0, 0.0]]
         );
         assert_eq!(graph.route([0.0, 0.0], [1.0, 1.0]).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ped_paths_use_the_nodes_after_the_car_nodes() {
+        // Two car nodes, then the trailing ped node written by `area_file`;
+        // give the ped node a link back to itself's neighbour car node 1.
+        let mut file = area_file(0, &[([0, 0], 0), ([10, 0], 0)], &[&[1], &[0]]);
+        let ped_row = 20 + 2 * NODE_SIZE;
+        file[ped_row + 8..ped_row + 10].copy_from_slice(&(40i16 * 8).to_le_bytes());
+        let peds = parse_area_of(&file, true).unwrap();
+        assert_eq!(peds.first_id, 2);
+        assert_eq!(peds.nodes.len(), 1);
+        assert_eq!(peds.nodes[0].0[0], 40.0);
+        let graph = build(&[Some(peds)]);
+        assert_eq!(graph.len(), 1);
+        assert_eq!(graph.position(0), [40.0, 0.0, 0.0]);
     }
 
     #[test]

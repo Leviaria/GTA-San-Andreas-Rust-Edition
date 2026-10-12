@@ -9,6 +9,7 @@ mod capture;
 mod chat;
 mod client_scripts;
 mod controller;
+mod crowd;
 mod culling;
 mod daycycle;
 mod gameplay_audio;
@@ -226,6 +227,14 @@ struct State {
     offline_world: Option<session_resources::World>,
     remote_actors: Vec<multiplayer::RemoteActor>,
     traffic: traffic::Traffic,
+    crowd: crowd::Crowd,
+    crowd_meshes: Vec<crowd::WalkerMesh>,
+    /// Ped catalog indices pedestrians may use, and the catalog size they were built for.
+    crowd_models: Vec<usize>,
+    crowd_models_for: usize,
+    /// Footpaths, loaded the first time pedestrians are needed.
+    ped_paths: Option<sa_scene::roads::RoadGraph>,
+    ped_paths_tried: bool,
     traffic_meshes: Vec<traffic::TrafficMesh>,
     /// Catalog indices traffic may use, and the catalog size they were built for.
     traffic_models: Vec<usize>,
@@ -863,6 +872,12 @@ impl State {
             offline_world: None,
             remote_actors: Vec::new(),
             traffic: traffic::Traffic::default(),
+            crowd: crowd::Crowd::default(),
+            crowd_meshes: Vec::new(),
+            crowd_models: Vec::new(),
+            crowd_models_for: usize::MAX,
+            ped_paths: None,
+            ped_paths_tried: false,
             traffic_meshes: Vec::new(),
             traffic_models: Vec::new(),
             traffic_models_for: usize::MAX,
@@ -1485,6 +1500,7 @@ impl State {
         }
         self.update_network();
         self.update_traffic(dt);
+        self.update_crowd(dt);
         let camera_time = self.animation.as_ref().and_then(|cut| {
             let keys = cut.camera_keys.as_ref()?;
             let duration = keys.last().unwrap().seconds.max(0.01);
@@ -1660,6 +1676,7 @@ impl State {
             .chain(self.car.iter().flat_map(|(_, b)| b))
             .chain(self.spawned_peds.iter().flat_map(|p| &p.batches))
             .chain(self.traffic_meshes.iter().flat_map(|m| &m.batches))
+            .chain(self.crowd_meshes.iter().flat_map(|m| &m.batches))
             .chain(
                 self.remote_actors
                     .iter()

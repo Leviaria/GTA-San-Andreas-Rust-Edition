@@ -1,0 +1,360 @@
+//! Pedestrians walking the game's own footpaths (the ped nodes in
+//! `nodes*.dat`): pavements, crossings and parks.
+//!
+//! Like traffic, walkers are kinematic. Each one strolls along the path
+//! graph at its own pace, picks a new branch at every junction, stops for
+//! anything right in front of it and disappears once far away. Their count
+//! is capped by the same kind of setting as traffic, so weak PCs can keep it
+//! low.
+use super::{GpuBatch, State};
+use crate::streaming::ORIGIN;
+use glam::{Quat, Vec3};
+use sa_scene::roads::RoadGraph;
+
+const SPAWN_NEAR: f32 = 35.0;
+const SPAWN_FAR: f32 = 90.0;
+const DESPAWN: f32 = 120.0;
+const SPAWN_INTERVAL: f32 = 0.4;
+/// Sideways offset so people walking in opposite directions pass each other.
+const KEEP_RIGHT: f32 = 0.6;
+/// How close something must be in front before a walker waits.
+const PERSONAL_SPACE: f32 = 1.4;
+
+#[derive(Clone, Debug)]
+pub struct Walker {
+    pub id: u64,
+    /// Ped catalog index this walker is drawn with.
+    pub catalog: usize,
+    from: u32,
+    to: u32,
+    along: f32,
+    /// Walking pace in m/s; zero while waiting.
+    pub speed: f32,
+    pace: f32,
+    pub feet: Vec3,
+    pub yaw: f32,
+}
+
+#[derive(Default)]
+pub struct Crowd {
+    pub walkers: Vec<Walker>,
+    seed: u32,
+    since_spawn: f32,
+    next_id: u64,
+}
+
+fn world(paths: &RoadGraph, node: u32) -> Vec3 {
+    let [x, y, z] = paths.position(node);
+    Vec3::new(x - ORIGIN[0], z, ORIGIN[1] - y)
+}
+
+fn next_random(seed: &mut u32) -> u32 {
+    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    *seed >> 8
+}
+
+impl Crowd {
+    /// Move every walker, retire distant ones and add one up to `limit`.
+    /// `blocked` are things to wait for (the player, cars). Returns the
+    /// index in `walkers` of a newly added walker so the caller can give it
+    /// a mesh.
+    pub fn update(
+        &mut self,
+        paths: &RoadGraph,
+        player: Vec3,
+        blocked: &[Vec3],
+        models: &[usize],
+        limit: usize,
+        dt: f32,
+    ) -> Option<usize> {
+        self.walkers.retain(|w| w.feet.distance(player) < DESPAWN);
+        self.walkers.truncate(limit);
+        let positions: Vec<Vec3> = self.walkers.iter().map(|w| w.feet).collect();
+        for (index, walker) in self.walkers.iter_mut().enumerate() {
+            let forward = Vec3::new(walker.yaw.sin(), 0.0, walker.yaw.cos());
+            let ahead = |point: Vec3| {
+                let offset = point - walker.feet;
+                let distance = offset.dot(forward);
+                distance > 0.1
+                    && distance < PERSONAL_SPACE
+                    && (offset - forward * distance).length() < 0.6
+                    && offset.y.abs() < 2.0
+            };
+            let waiting = blocked.iter().copied().any(ahead)
+                || positions
+                    .iter()
+                    .enumerate()
+                    .any(|(other, &p)| other != index && ahead(p));
+            walker.speed = if waiting { 0.0 } else { walker.pace };
+            walker.along += walker.speed * dt;
+            let mut guard = 0;
+            while walker.along >= length(paths, walker.from, walker.to) && guard < 8 {
+                guard += 1;
+                walker.along -= length(paths, walker.from, walker.to);
+                let options: Vec<u32> = paths
+                    .neighbours(walker.to)
+                    .iter()
+                    .copied()
+                    .filter(|&n| n != walker.from)
+                    .collect();
+                let next = if options.is_empty() {
+                    walker.from
+                } else {
+                    options[next_random(&mut self.seed) as usize % options.len()]
+                };
+                walker.from = walker.to;
+                walker.to = next;
+            }
+            place(walker, paths);
+        }
+        self.since_spawn += dt;
+        if self.walkers.len() >= limit || models.is_empty() || self.since_spawn < SPAWN_INTERVAL {
+            return None;
+        }
+        self.since_spawn = 0.0;
+        let at = [player.x + ORIGIN[0], ORIGIN[1] - player.z];
+        let candidates = paths.nodes_between(at, SPAWN_NEAR, SPAWN_FAR);
+        if candidates.is_empty() {
+            return None;
+        }
+        let from = candidates[next_random(&mut self.seed) as usize % candidates.len()];
+        let next = paths.neighbours(from);
+        if next.is_empty() {
+            return None;
+        }
+        let to = next[next_random(&mut self.seed) as usize % next.len()];
+        let catalog = models[next_random(&mut self.seed) as usize % models.len()];
+        // 1.1 to 1.6 m/s: most people amble, a few are in a hurry.
+        let pace = 1.1 + (next_random(&mut self.seed) % 100) as f32 * 0.005;
+        self.next_id += 1;
+        let mut walker = Walker {
+            id: self.next_id,
+            catalog,
+            from,
+            to,
+            along: 0.0,
+            speed: pace,
+            pace,
+            feet: Vec3::ZERO,
+            yaw: 0.0,
+        };
+        place(&mut walker, paths);
+        if self
+            .walkers
+            .iter()
+            .any(|other| other.feet.distance(walker.feet) < PERSONAL_SPACE)
+        {
+            return None;
+        }
+        self.walkers.push(walker);
+        Some(self.walkers.len() - 1)
+    }
+}
+
+fn length(paths: &RoadGraph, from: u32, to: u32) -> f32 {
+    (world(paths, to) - world(paths, from)).length().max(0.1)
+}
+
+fn place(walker: &mut Walker, paths: &RoadGraph) {
+    let (a, b) = (world(paths, walker.from), world(paths, walker.to));
+    let direction = (b - a).normalize_or_zero();
+    let flat = Vec3::new(direction.x, 0.0, direction.z).normalize_or_zero();
+    let right = Vec3::new(-flat.z, 0.0, flat.x);
+    walker.feet = a + direction * walker.along + right * KEEP_RIGHT;
+    if flat != Vec3::ZERO {
+        walker.yaw = flat.x.atan2(flat.z);
+    }
+}
+
+/// A walker's own copy of its mesh, posed on the CPU every frame.
+pub(super) struct WalkerMesh {
+    id: u64,
+    pub batches: Vec<GpuBatch>,
+}
+
+impl State {
+    fn refresh_crowd_models(&mut self) {
+        let civilian: std::collections::HashSet<String> =
+            sa_scene::ped_list::original_peds(&self.resource_game_dir)
+                .into_iter()
+                .filter(|ped| matches!(ped.kind.as_str(), "CIVMALE" | "CIVFEMALE"))
+                .map(|ped| ped.model)
+                .collect();
+        self.crowd_models = (0..self.menu.peds.len())
+            .filter(|&index| {
+                self.menu
+                    .peds
+                    .get(index)
+                    .and_then(|name| self.original_ped_models.get(name))
+                    .is_some_and(|model| civilian.contains(model))
+            })
+            .collect();
+        self.crowd_models_for = self.menu.peds.len();
+    }
+
+    pub(super) fn update_crowd(&mut self, dt: f32) {
+        if self.crowd_models_for != self.menu.peds.len() {
+            self.refresh_crowd_models();
+        }
+        if self.ped_paths.is_none() && !self.ped_paths_tried {
+            self.ped_paths_tried = true;
+            match RoadGraph::load_peds(&self.resource_game_dir) {
+                Ok(paths) => self.ped_paths = Some(paths),
+                Err(error) => eprintln!("Pedestrian paths unavailable: {error:#}"),
+            }
+        }
+        let Some(paths) = self.ped_paths.as_ref() else {
+            return;
+        };
+        let limit = if self.interior == 0 {
+            self.menu.settings.pedestrians as usize
+        } else {
+            0
+        };
+        let player = match (&self.car, &self.player) {
+            (Some((car, _)), _) if self.driving => car.position,
+            (_, Some(player)) if self.walking => player.feet,
+            _ => self.position,
+        };
+        let mut blocked = vec![player];
+        blocked.extend(self.traffic.cars.iter().map(|car| car.position));
+        let added = self
+            .crowd
+            .update(paths, player, &blocked, &self.crowd_models, limit, dt);
+        let walkers = &self.crowd.walkers;
+        self.crowd_meshes
+            .retain(|mesh| walkers.iter().any(|w| w.id == mesh.id));
+        if let Some(index) = added {
+            let (id, catalog) = (
+                self.crowd.walkers[index].id,
+                self.crowd.walkers[index].catalog,
+            );
+            self.ensure_ped_loaded(catalog);
+            let source = if catalog == self.active_ped {
+                self.ped.as_ref()
+            } else {
+                self.ped_catalog.get(catalog).and_then(|p| p.as_ref())
+            };
+            match source {
+                Some((_, batches)) => self.crowd_meshes.push(WalkerMesh {
+                    id,
+                    batches: crate::multiplayer::duplicate(&self.device, batches),
+                }),
+                None => {
+                    self.crowd.walkers.remove(index);
+                }
+            }
+        }
+        let seconds = self.npc_seconds;
+        for mesh in &self.crowd_meshes {
+            let Some(walker) = self.crowd.walkers.iter().find(|w| w.id == mesh.id) else {
+                continue;
+            };
+            let source = if walker.catalog == self.active_ped {
+                self.ped.as_ref()
+            } else {
+                self.ped_catalog
+                    .get(walker.catalog)
+                    .and_then(|p| p.as_ref())
+            };
+            let Some((ped, _)) = source else { continue };
+            // Offset each walker's clock so a crowd does not step in unison.
+            let time = seconds + (walker.id % 17) as f32 * 0.13;
+            let posed = if walker.speed > 0.0 {
+                ped.frame("walk_civi", time)
+                    .or_else(|_| ped.frame("walk_player", time))
+            } else {
+                ped.frame("idle_stance", time)
+            };
+            let Ok(posed) = posed else { continue };
+            let rotation = Quat::from_rotation_y(walker.yaw + std::f32::consts::PI);
+            for (part, batch) in posed.iter().zip(&mesh.batches) {
+                if part.vertices.len() * 9 != batch.base.len() {
+                    continue;
+                }
+                let mut raw = Vec::with_capacity(part.vertices.len() * 9);
+                for vertex in &part.vertices {
+                    raw.extend(
+                        (rotation * Vec3::from_array(vertex.position) + walker.feet).to_array(),
+                    );
+                    raw.extend(vertex.uv);
+                    raw.extend(vertex.color);
+                }
+                self.queue
+                    .write_buffer(&batch.buffer, 0, bytemuck::cast_slice(&raw));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A straight pavement running north with a junction halfway.
+    fn pavement() -> RoadGraph {
+        let o = ORIGIN;
+        let mut nodes: Vec<[f32; 3]> = (0..30)
+            .map(|i| [o[0] + 5.0, o[1] + i as f32 * 5.0, 10.0])
+            .collect();
+        nodes.push([o[0] + 20.0, o[1] + 75.0, 10.0]);
+        let mut links: Vec<Vec<u32>> = (0..30u32)
+            .map(|i| {
+                let mut l = Vec::new();
+                if i > 0 {
+                    l.push(i - 1);
+                }
+                if i < 29 {
+                    l.push(i + 1);
+                }
+                l
+            })
+            .collect();
+        links[15].push(30);
+        links.push(vec![15]);
+        RoadGraph::from_parts(nodes, links)
+    }
+
+    #[test]
+    fn walkers_appear_away_from_the_player_and_walk() {
+        let paths = pavement();
+        let mut crowd = Crowd::default();
+        assert_eq!(crowd.update(&paths, Vec3::ZERO, &[], &[7], 4, 1.0), Some(0));
+        let start = crowd.walkers[0].feet;
+        assert!(start.distance(Vec3::ZERO) >= SPAWN_NEAR - 2.0);
+        assert_eq!(crowd.walkers[0].catalog, 7);
+        for _ in 0..20 {
+            crowd.update(&paths, Vec3::ZERO, &[], &[7], 4, 0.1);
+        }
+        let walked = crowd.walkers[0].feet.distance(start);
+        assert!((1.5..4.0).contains(&walked), "{walked}");
+        assert!((start.y - 10.0).abs() < 1e-3, "feet stay on the path");
+    }
+
+    #[test]
+    fn walkers_wait_for_someone_in_front() {
+        let paths = pavement();
+        let mut crowd = Crowd::default();
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 1.0);
+        let w = crowd.walkers[0].clone();
+        let forward = Vec3::new(w.yaw.sin(), 0.0, w.yaw.cos());
+        let blocker = w.feet + forward;
+        crowd.update(&paths, Vec3::ZERO, &[blocker], &[1], 1, 0.1);
+        assert_eq!(crowd.walkers[0].speed, 0.0);
+        assert!(crowd.walkers[0].feet.distance(w.feet) < 1e-3);
+    }
+
+    #[test]
+    fn limit_and_distance_retire_walkers() {
+        let paths = pavement();
+        let mut crowd = Crowd::default();
+        for _ in 0..100 {
+            crowd.update(&paths, Vec3::ZERO, &[], &[1, 2], 6, 0.1);
+        }
+        assert!(!crowd.walkers.is_empty() && crowd.walkers.len() <= 6);
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 2, 0.1);
+        assert!(crowd.walkers.len() <= 2);
+        crowd.update(&paths, Vec3::splat(5000.0), &[], &[], 6, 0.1);
+        assert!(crowd.walkers.is_empty());
+    }
+}

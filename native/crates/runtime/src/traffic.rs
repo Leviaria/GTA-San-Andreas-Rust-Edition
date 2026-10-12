@@ -258,6 +258,8 @@ impl State {
                     Vec3::from_array(car.position)
                 })
         }));
+        // Stop for people crossing too.
+        blocked.extend(self.crowd.walkers.iter().map(|w| w.feet));
         let added = self
             .traffic
             .update(roads, player, &blocked, &self.traffic_models, limit, dt);

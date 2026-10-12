@@ -435,6 +435,7 @@ impl Menu {
                 ("Free-fly speed", format!("{:.0} m/s", s.fly_speed), "Base movement speed for the free-fly camera."),
                 ("Tire grip", format!("{:.1}", s.vehicle_handling), "Higher values give stronger cornering grip. Engine power stays the same."),
                 ("Traffic", if s.traffic_cars == 0 { "Off".into() } else { format!("{} cars", s.traffic_cars) }, "Cars driving the city's roads around you. Fewer cars run faster on weak PCs."),
+                ("Pedestrians", if s.pedestrians == 0 { "Off".into() } else { format!("{} people", s.pedestrians) }, "People walking the pavements around you. Fewer run faster on weak PCs."),
             ],
             SettingsTab::Interface => vec![
                 ("HUD", on(s.show_hud), "Shows gameplay information over the world."),
@@ -562,6 +563,13 @@ impl Menu {
                     s.traffic_cars.saturating_sub(4)
                 } else {
                     s.traffic_cars + 4
+                }
+            }
+            (SettingsTab::Gameplay, 6) => {
+                s.pedestrians = if left {
+                    s.pedestrians.saturating_sub(4)
+                } else {
+                    s.pedestrians + 4
                 }
             }
             (SettingsTab::Interface, 1) => s.show_hud = !s.show_hud,
