@@ -1739,6 +1739,11 @@ impl State {
     fn respawn(&mut self) {
         self.leave_passenger();
         self.arsenal.refill();
+        // A car that fell out of the world is put back on the road with the
+        // player still at the wheel, instead of throwing them out on foot.
+        if self.driving && self.room_entry.is_none() && self.recover_car() {
+            return;
+        }
         self.driving = false;
         self.spawned_peds.clear();
         // Recover on loaded ground rather than teleporting into an unloaded map.
@@ -1760,6 +1765,24 @@ impl State {
             self.position = player.eye();
             self.player = Some(player);
         }
+    }
+    fn recover_car(&mut self) -> bool {
+        let (Some(world), Some((car, _))) = (&self.collision, &mut self.car) else {
+            return false;
+        };
+        let around = Vec3::new(
+            car.position.x,
+            car.position.y.max(0.0) + 200.0,
+            car.position.z,
+        );
+        let Some(placed) =
+            sa_scene::vehicle::Car::spawn_near(world, around, car.yaw, car.clearance)
+        else {
+            return false;
+        };
+        *car = placed.with_handling(car.handling);
+        self.car_render_pose = None;
+        true
     }
     fn spawn_ped(&mut self, index: usize) -> Result<()> {
         self.ensure_ped_loaded(index);
