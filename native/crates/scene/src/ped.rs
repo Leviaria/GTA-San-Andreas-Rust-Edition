@@ -329,6 +329,46 @@ impl Ped {
         }
         Ok(batches)
     }
+    /// Where a bone (by HAnim id, e.g. 24 for the right hand) sits in this
+    /// ped's own space for a clip at a time. The matrix takes a model built
+    /// the way `load_weapon_model` builds it into the hand, in the same space
+    /// as the vertices `frame` returns.
+    pub fn bone_matrix(&self, name: &str, seconds: f32, bone_id: i32) -> Result<glam::Mat4> {
+        let clip = self
+            .clips
+            .clips
+            .iter()
+            .find(|c| c.name == name)
+            .context("missing ped clip")?;
+        let locals = clip.pose(&self.model, seconds, true)?;
+        let world = self.model.world_matrices(&locals)?;
+        let frame = self
+            .model
+            .frames
+            .iter()
+            .position(|f| f.bone_id == Some(bone_id))
+            .context("ped has no such bone")?;
+        let m = world[frame];
+        let bone = glam::Mat4::from_cols(
+            glam::Vec4::new(m[0], m[1], m[2], 0.0),
+            glam::Vec4::new(m[3], m[4], m[5], 0.0),
+            glam::Vec4::new(m[6], m[7], m[8], 0.0),
+            glam::Vec4::new(m[9], m[10], m[11], 1.0),
+        );
+        // RenderWare is Z-up; the engine is Y-up with -Z north (see `place`).
+        let to_engine = glam::Mat4::from_cols(
+            glam::Vec4::X,
+            glam::Vec4::new(0.0, 0.0, -1.0, 0.0),
+            glam::Vec4::Y,
+            glam::Vec4::W,
+        );
+        Ok(
+            glam::Mat4::from_translation(glam::Vec3::Y * self.height_offset)
+                * to_engine
+                * bone
+                * to_engine.inverse(),
+        )
+    }
     pub fn scene(&self) -> Result<Scene> {
         let mut batches = self.frame("idle_stance", 0.0)?;
         for batch in &mut batches {

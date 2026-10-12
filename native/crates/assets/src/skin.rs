@@ -224,7 +224,8 @@ impl Model {
     pub fn bind_pose(&self) -> Vec<Matrix> {
         self.frames.iter().map(|f| f.local).collect()
     }
-    pub fn pose(&self, locals: &[Matrix]) -> Result<Vec<Geometry>> {
+    /// Each frame's transform in model space for a pose of local matrices.
+    pub fn world_matrices(&self, locals: &[Matrix]) -> Result<Vec<Matrix>> {
         ensure!(
             locals.len() == self.frames.len() && locals.iter().flatten().all(|v| v.is_finite()),
             "invalid skeleton pose"
@@ -262,6 +263,10 @@ impl Model {
         for i in 0..self.frames.len() {
             visit(self, locals, i, &mut states, &mut world)?;
         }
+        Ok(world)
+    }
+    pub fn pose(&self, locals: &[Matrix]) -> Result<Vec<Geometry>> {
+        let world = self.world_matrices(locals)?;
         let mut posed = Vec::new();
         for part in &self.parts {
             ensure!(
