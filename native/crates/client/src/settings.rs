@@ -65,6 +65,8 @@ pub struct Settings {
     pub traffic_cars: u32,
     /// Most pedestrians walking around the player; zero turns them off.
     pub pedestrians: u32,
+    /// Swing the driving camera back behind the car after looking around.
+    pub car_camera_recenter: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -102,6 +104,7 @@ impl Default for Settings {
             auto_mod_downloads: true,
             traffic_cars: 12,
             pedestrians: 16,
+            car_camera_recenter: true,
         }
     }
 }

@@ -1394,7 +1394,7 @@ impl State {
                 // The mouse orbits freely around the car; after a short pause
                 // the camera swings back behind it, as in SA.
                 self.car_look_idle += dt;
-                if self.car_look_idle > 1.5 {
+                if self.menu.settings.car_camera_recenter && self.car_look_idle > 1.5 {
                     let turn = car.yaw - self.yaw;
                     let ease = 1.0 - (-5.0 * dt).exp();
                     self.yaw += turn.sin().atan2(turn.cos()) * ease;
