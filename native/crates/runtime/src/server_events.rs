@@ -111,7 +111,7 @@ impl State {
                 self.chat.close();
                 self.capture(false);
             }
-            "connect" => match rest.first().and_then(|a| a.parse::<std::net::SocketAddr>().ok()) {
+            "connect" => match rest.first().and_then(|a| crate::session_resources::resolve_address(a)) {
                 Some(address) => {
                     if self.network_session.is_some() {
                         self.disconnect_network();

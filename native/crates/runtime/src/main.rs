@@ -237,6 +237,8 @@ struct State {
     gun_drawn: Option<i32>,
     /// Left and right mouse buttons: fire and aim.
     fire_held: bool,
+    /// Seconds since the mouse last moved the camera around a driven car.
+    car_look_idle: f32,
     aim_held: bool,
     crowd: crowd::Crowd,
     crowd_meshes: Vec<crowd::WalkerMesh>,
@@ -399,6 +401,7 @@ impl State {
         if !self.driving && self.try_passenger(false) {
             return;
         }
+        let mut steal = false;
         if let (Some(world), Some((car, _))) = (&self.collision, &mut self.car) {
             if self.driving {
                 if let Some(player) = car.exit_player(world) {
@@ -411,9 +414,51 @@ impl State {
             } else if self.position.distance(car.position) < 6.0 {
                 self.driving = true;
                 self.network_car_spawned = true;
+            } else {
+                steal = true;
             }
             self.keys.clear();
         }
+        if steal {
+            self.steal_traffic_car();
+        }
+    }
+    /// Take the nearest passing traffic car, like jacking one in SA: the
+    /// driver is gone and the player drives off in that model.
+    fn steal_traffic_car(&mut self) {
+        let feet = self.player.as_ref().map_or(self.position, |p| p.feet);
+        let Some(index) = self
+            .traffic
+            .cars
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, c.position.distance(feet)))
+            .filter(|(_, d)| *d < 5.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+        else {
+            return;
+        };
+        let stolen = self.traffic.cars.remove(index);
+        let catalog = stolen.catalog;
+        self.ensure_car_loaded(catalog);
+        if catalog != self.active_car {
+            let Some(next) = self.car_catalog.get_mut(catalog).and_then(Option::take) else {
+                return;
+            };
+            self.car_catalog[self.active_car] = self.car.replace(next);
+            self.active_car = catalog;
+        }
+        let Some((car, _)) = &mut self.car else {
+            return;
+        };
+        car.stop();
+        car.position = stolen.position + Vec3::Y * car.clearance;
+        car.yaw = stolen.yaw;
+        self.car_render_pose = None;
+        self.leave_passenger();
+        self.driving = true;
+        self.network_car_spawned = true;
     }
     async fn new(
         window: Arc<Window>,
@@ -889,6 +934,7 @@ impl State {
             gun_meshes: std::collections::HashMap::new(),
             gun_drawn: None,
             fire_held: false,
+            car_look_idle: 0.0,
             aim_held: false,
             crowd: crowd::Crowd::default(),
             crowd_meshes: Vec::new(),
@@ -1345,13 +1391,20 @@ impl State {
                 }
                 // Ease the chase camera and radar heading behind the car instead
                 // of locking them to every small yaw correction of the body.
-                let turn = car.yaw - self.yaw;
-                self.yaw += turn.sin().atan2(turn.cos()) * (1.0 - (-5.0 * dt).exp());
+                // The mouse orbits freely around the car; after a short pause
+                // the camera swings back behind it, as in SA.
+                self.car_look_idle += dt;
+                if self.car_look_idle > 1.5 {
+                    let turn = car.yaw - self.yaw;
+                    let ease = 1.0 - (-5.0 * dt).exp();
+                    self.yaw += turn.sin().atan2(turn.cos()) * ease;
+                    self.pitch -= self.pitch * ease;
+                }
+                let elevation = (0.45 - self.pitch).clamp(-0.1, 1.4);
                 let behind = Vec3::new(self.yaw.sin(), 0.0, self.yaw.cos());
-                self.position = world.clip_camera(
-                    car.position + Vec3::Y,
-                    car.position - behind * 7.0 + Vec3::Y * 3.5,
-                );
+                let offset = (-behind * elevation.cos() + Vec3::Y * elevation.sin()) * 7.8;
+                self.position =
+                    world.clip_camera(car.position + Vec3::Y, car.position + Vec3::Y + offset);
             }
         } else if self.walking {
             if let (Some(world), Some(player)) = (&self.collision, &mut self.player) {
@@ -3991,6 +4044,12 @@ impl ApplicationHandler for App {
                             KeyCode::KeyV if !event.repeat => {
                                 state.third_person = !state.third_person;
                             }
+                            // SA's on-foot weapon switch keys, besides the mouse wheel.
+                            KeyCode::KeyQ | KeyCode::KeyE
+                                if !event.repeat && state.walking && !state.driving =>
+                            {
+                                state.arsenal.cycle(code == KeyCode::KeyE);
+                            }
                             KeyCode::KeyF if !event.repeat => {
                                 state.toggle_car();
                             }
@@ -4130,6 +4189,7 @@ impl ApplicationHandler for App {
     ) {
         if let (Some(state), DeviceEvent::MouseMotion { delta }) = (self.state.as_mut(), event) {
             if state.captured {
+                state.car_look_idle = 0.0;
                 state.yaw -= delta.0 as f32 * 0.0025 * state.menu.settings.sensitivity;
                 state.pitch = (state.pitch
                     - delta.1 as f32

@@ -164,3 +164,17 @@ live restart and kick, plus the example framework (includes, `provide`, function
 references, state bags and deferrals), client script download and the script
 UI, and CfxLua translation. `tools/test-multiplayer.ps1 -Dedicated [-Relay]` starts a
 server from a generated `server-data` plus two Vulkan game instances.
+
+## Hosting through playit.gg
+
+SARE gameplay is plain TCP, so a playit.gg tunnel works without port
+forwarding:
+
+1. Start the server (or F5 → Host in the game) on port 7777.
+2. In the playit.gg agent, add a **TCP** tunnel pointing at local port `7777`.
+3. Share the address playit gives you, such as `name.gl.joinmc.link:12345`.
+   Players type it in the Join box or in the F8 console with
+   `connect name.gl.joinmc.link:12345`. Host names are resolved, so the
+   playit address works as is.
+
+rcon uses UDP; add a UDP tunnel on the same local port only if you need it.

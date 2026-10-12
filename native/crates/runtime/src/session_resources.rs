@@ -473,11 +473,8 @@ impl State {
             )
         } else {
             Endpoint::Join(
-                self.menu
-                    .join_address
-                    .trim()
-                    .parse()
-                    .context("Use the host's IP and port")?,
+                resolve_address(&self.menu.join_address)
+                    .context("Use the host's IP or address and port")?,
             )
         };
         let game = self.resource_game_dir.clone();
@@ -582,5 +579,33 @@ impl State {
                 }
             }
         }
+    }
+}
+
+/// A host as `ip:port` or `name:port`, so tunnel addresses such as
+/// playit.gg's `something.joinmc.link:12345` work as well as plain IPs.
+pub(crate) fn resolve_address(text: &str) -> Option<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let text = text.trim();
+    text.parse().ok().or_else(|| {
+        let mut found: Vec<_> = text.to_socket_addrs().ok()?.collect();
+        found.sort_by_key(|a| !a.is_ipv4());
+        found.into_iter().next()
+    })
+}
+
+#[cfg(test)]
+mod address_tests {
+    #[test]
+    fn plain_and_named_hosts_resolve() {
+        assert_eq!(
+            super::resolve_address(" 127.0.0.1:7777 ").unwrap().port(),
+            7777
+        );
+        assert_eq!(
+            super::resolve_address("localhost:7777").unwrap().port(),
+            7777
+        );
+        assert!(super::resolve_address("no port").is_none());
     }
 }
