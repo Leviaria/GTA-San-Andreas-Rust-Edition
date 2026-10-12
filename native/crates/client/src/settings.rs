@@ -63,6 +63,8 @@ pub struct Settings {
     pub auto_mod_downloads: bool,
     /// Most ambient traffic cars around the player; zero turns traffic off.
     pub traffic_cars: u32,
+    /// Most pedestrians walking around the player; zero turns them off.
+    pub pedestrians: u32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -99,6 +101,7 @@ impl Default for Settings {
             effects_volume: 1.0,
             auto_mod_downloads: true,
             traffic_cars: 12,
+            pedestrians: 16,
         }
     }
 }
@@ -128,6 +131,7 @@ pub const WEATHER_NAMES: [&str; 20] = [
 impl Settings {
     pub fn sanitize(&mut self) {
         self.traffic_cars = self.traffic_cars.min(24);
+        self.pedestrians = self.pedestrians.min(32);
         let defaults = Self::default();
         self.render_scale = self.render_scale.clamp(50, 150);
         if ![1, 2, 4, 8, 16].contains(&self.texture_anisotropy) {
