@@ -27,6 +27,7 @@ mod settings;
 mod shadow;
 mod skids;
 mod streaming;
+mod traffic;
 mod upload;
 mod zones;
 use streaming::{Streamer, ORIGIN, RADIUS};
@@ -221,6 +222,11 @@ struct State {
     resource_installing: Option<session_resources::Installing>,
     offline_world: Option<session_resources::World>,
     remote_actors: Vec<multiplayer::RemoteActor>,
+    traffic: traffic::Traffic,
+    traffic_meshes: Vec<traffic::TrafficMesh>,
+    /// Catalog indices traffic may use, and the catalog size they were built for.
+    traffic_models: Vec<usize>,
+    traffic_models_for: usize,
     network_revision: u64,
     network_last: Instant,
     network_pose_last: Instant,
@@ -845,6 +851,10 @@ impl State {
             resource_installing: None,
             offline_world: None,
             remote_actors: Vec::new(),
+            traffic: traffic::Traffic::default(),
+            traffic_meshes: Vec::new(),
+            traffic_models: Vec::new(),
+            traffic_models_for: usize::MAX,
             network_revision: 0,
             network_last: Instant::now(),
             network_pose_last: Instant::now(),
@@ -1451,6 +1461,7 @@ impl State {
             }
         }
         self.update_network();
+        self.update_traffic(dt);
         let camera_time = self.animation.as_ref().and_then(|cut| {
             let keys = cut.camera_keys.as_ref()?;
             let duration = keys.last().unwrap().seconds.max(0.01);
@@ -1619,6 +1630,7 @@ impl State {
             .filter(move |batch| !self.culling_enabled || frustum.visible(batch.bounds))
             .chain(self.car.iter().flat_map(|(_, b)| b))
             .chain(self.spawned_peds.iter().flat_map(|p| &p.batches))
+            .chain(self.traffic_meshes.iter().flat_map(|m| &m.batches))
             .chain(
                 self.remote_actors
                     .iter()

@@ -433,6 +433,7 @@ impl Menu {
                 ("Invert vertical look", on(s.invert_y), "Reverses the vertical camera direction."),
                 ("Free-fly speed", format!("{:.0} m/s", s.fly_speed), "Base movement speed for the free-fly camera."),
                 ("Tire grip", format!("{:.1}", s.vehicle_handling), "Higher values give stronger cornering grip. Engine power stays the same."),
+                ("Traffic", if s.traffic_cars == 0 { "Off".into() } else { format!("{} cars", s.traffic_cars) }, "Cars driving the city's roads around you. Fewer cars run faster on weak PCs."),
             ],
             SettingsTab::Interface => vec![
                 ("HUD", on(s.show_hud), "Shows gameplay information over the world."),
@@ -544,6 +545,13 @@ impl Menu {
             (SettingsTab::Gameplay, 2) => s.invert_y = !s.invert_y,
             (SettingsTab::Gameplay, 3) => s.fly_speed += delta,
             (SettingsTab::Gameplay, 4) => s.vehicle_handling += delta * 0.1,
+            (SettingsTab::Gameplay, 5) => {
+                s.traffic_cars = if left {
+                    s.traffic_cars.saturating_sub(4)
+                } else {
+                    s.traffic_cars + 4
+                }
+            }
             (SettingsTab::Interface, 1) => s.show_hud = !s.show_hud,
             (SettingsTab::Interface, 2) => s.show_minimap = !s.show_minimap,
             (SettingsTab::Interface, 3) => s.show_speedometer = !s.show_speedometer,
