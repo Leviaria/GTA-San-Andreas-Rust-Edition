@@ -67,6 +67,27 @@ impl Handling {
         Ok(())
     }
 }
+/// Body size used until a model is measured: an average saloon.
+pub const DEFAULT_SIZE: [f32; 3] = [0.95, 2.4, 1.5];
+/// Half width, half length and height of a model from its vertices. Models
+/// face -Z, so length runs along Z. Odd or empty models fall back to sane bounds.
+pub fn measure(points: impl IntoIterator<Item = [f32; 3]>) -> [f32; 3] {
+    let (mut low, mut high) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for p in points {
+        let p = Vec3::from_array(p);
+        low = low.min(p);
+        high = high.max(p);
+    }
+    if !low.is_finite() || !high.is_finite() {
+        return DEFAULT_SIZE;
+    }
+    let extent = high - low;
+    [
+        (extent.x / 2.0).clamp(0.3, 2.5),
+        (extent.z / 2.0).clamp(0.6, 10.0),
+        extent.y.clamp(0.5, 5.0),
+    ]
+}
 pub struct Car {
     pub handling: Handling,
     pub position: Vec3,
@@ -75,6 +96,9 @@ pub struct Car {
     pub clearance: f32,
     pub pitch: f32,
     pub roll: f32,
+    /// Half width, half length and height of the body, for car-to-car and
+    /// car-to-ped contacts.
+    pub size: [f32; 3],
     vertical_speed: f32,
     lateral_speed: f32,
     steering_angle: f32,
@@ -94,6 +118,7 @@ impl Car {
             clearance,
             pitch: 0.0,
             roll: 0.0,
+            size: DEFAULT_SIZE,
             vertical_speed: 0.0,
             lateral_speed: 0.0,
             steering_angle: 0.0,
@@ -106,6 +131,39 @@ impl Car {
     pub fn with_handling(mut self, handling: Handling) -> Self {
         self.handling = handling;
         self
+    }
+    pub fn with_size(mut self, size: [f32; 3]) -> Self {
+        self.size = size;
+        self
+    }
+    /// Push the car out of another vehicle or obstacle by `push` (horizontal)
+    /// and take the impact: the closing speed along the contact normal is
+    /// reflected with a little bounce, like a soft crash in SA.
+    pub fn collide(&mut self, world: &CollisionWorld, push: Vec3, obstacle_velocity: Vec3) {
+        let push = Vec3::new(push.x, 0.0, push.z);
+        let normal = push.normalize_or_zero();
+        if normal == Vec3::ZERO {
+            return;
+        }
+        if self.body_clear(world, self.position + push) {
+            self.position += push;
+        }
+        let side = Vec3::new(self.yaw.cos(), 0.0, -self.yaw.sin());
+        let mut velocity = self.forward() * self.speed + side * self.lateral_speed;
+        let closing = (velocity - obstacle_velocity).dot(normal);
+        if closing < 0.0 {
+            velocity -= normal * closing * 1.3;
+            // Glancing blows spin the body a little.
+            self.yaw_rate += self.forward().cross(normal).y * closing * 0.15;
+            self.yaw_rate = self.yaw_rate.clamp(-2.0, 2.0);
+        }
+        self.speed = velocity.dot(self.forward());
+        self.lateral_speed = velocity.dot(side);
+    }
+    /// World velocity of the body, ignoring vertical motion.
+    pub fn velocity(&self) -> Vec3 {
+        let side = Vec3::new(self.yaw.cos(), 0.0, -self.yaw.sin());
+        self.forward() * self.speed + side * self.lateral_speed
     }
     /// Sideways tyre slip in m/s, zero while airborne. Drives skid marks.
     pub fn slip(&self) -> f32 {
@@ -421,6 +479,31 @@ impl Car {
 mod tests {
     use super::*;
     use crate::{Batch, Vertex};
+    #[test]
+    fn a_crash_stops_the_closing_speed_and_bounces_a_little() {
+        let world = CollisionWorld::from_batches(&[]);
+        let mut car = Car::new(Vec3::new(0.0, 1.0, 0.0), 0.5);
+        car.speed = 20.0;
+        // Rear-ended a parked car ahead: pushed back along -Z.
+        car.collide(&world, Vec3::new(0.0, 0.0, -0.4), Vec3::ZERO);
+        assert!((car.position.z + 0.4).abs() < 1e-5);
+        assert!(car.speed < 0.0 && car.speed > -8.0, "{}", car.speed);
+        // Moving away already: the contact leaves the speed alone.
+        car.speed = -3.0;
+        car.collide(&world, Vec3::new(0.0, 0.0, -0.1), Vec3::ZERO);
+        assert_eq!(car.speed, -3.0);
+        // Following a car that drives at the same speed: no impact.
+        car.speed = 10.0;
+        car.collide(&world, Vec3::new(0.0, 0.0, -0.1), Vec3::new(0.0, 0.0, 10.0));
+        assert!((car.speed - 10.0).abs() < 1e-4);
+    }
+    #[test]
+    fn measured_size_follows_the_model_and_stays_sane() {
+        let size = measure([[-1.0, -0.4, -2.5], [1.0, 1.2, 2.5]]);
+        assert_eq!(size, [1.0, 2.5, 1.6]);
+        assert_eq!(measure(std::iter::empty()), DEFAULT_SIZE);
+        assert_eq!(measure([[0.0; 3]]), [0.3, 0.6, 0.5]);
+    }
     #[test]
     fn handling_rejects_unknown_nonfinite_and_out_of_range_values() {
         let partial: Handling = serde_json::from_str(r#"{"acceleration":9.0}"#).unwrap();
