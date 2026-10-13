@@ -363,7 +363,7 @@ pub struct Menu {
     pub zone: Option<String>,
     /// Area last announced, and when (egui time) it changed.
     zone_announced: (Option<String>, f64),
-    /// Held gun: name, rounds loaded, spare rounds, aiming, reloading.
+    /// Held weapon: name, rounds loaded, spare rounds, whether a gun is held, reloading.
     pub weapon_hud: Option<(String, u32, u32, bool, bool)>,
     pub ride_status: String,
     pub network_players: Vec<String>,
@@ -1170,6 +1170,8 @@ impl Menu {
                             );
                             let ammo = if *reloading {
                                 "RELOADING".to_owned()
+                            } else if !*aiming {
+                                "Q / E or mouse wheel: switch weapon".to_owned()
                             } else {
                                 format!("{loaded} - {spare}")
                             };
@@ -1383,7 +1385,8 @@ impl Menu {
                                 } else {
                                     ui.label("Host address (0.0.0.0:7777 for LAN)");
                                     ui.text_edit_singleline(&mut self.host_address);
-                                    ui.label("Join address (the host's IP and port)");
+                                    ui.label(RichText::new("Over the internet without port forwarding: run the playit.gg program, add a TCP tunnel to local port 7777, press Host session, and give friends the address playit shows.").small());
+                                    ui.label("Join address (IP:port, or a playit.gg address)");
                                     ui.text_edit_singleline(&mut self.join_address);
                                 }
                             });
