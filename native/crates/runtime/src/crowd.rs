@@ -36,6 +36,8 @@ pub struct Walker {
     pub health: f32,
     /// Seconds since this walker died, if it has.
     pub dead_for: Option<f32>,
+    /// Hit but still standing; the renderer plays a flinch and clears it.
+    pub flinch: bool,
     /// Seconds left running away after gunfire nearby.
     pub panic: f32,
 }
@@ -168,6 +170,7 @@ impl Crowd {
             yaw: 0.0,
             health: 100.0,
             dead_for: None,
+            flinch: false,
             panic: 0.0,
         };
         place(&mut walker, paths);
@@ -212,6 +215,7 @@ impl Crowd {
             walker.speed = 0.0;
             return true;
         }
+        walker.flinch = true;
         false
     }
 
@@ -350,7 +354,7 @@ impl State {
             }
         }
         for mesh in &mut self.crowd_meshes {
-            let Some(walker) = self.crowd.walkers.iter().find(|w| w.id == mesh.id) else {
+            let Some(walker) = self.crowd.walkers.iter_mut().find(|w| w.id == mesh.id) else {
                 continue;
             };
             let source = if walker.catalog == self.active_ped {
@@ -361,6 +365,12 @@ impl State {
                     .and_then(|p| p.as_ref())
             };
             let Some((ped, _)) = source else { continue };
+            if std::mem::take(&mut walker.flinch) {
+                mesh.animator
+                    .overlay(&["hit_front", "hit_l", "hit_r"], |name| {
+                        ped.clip_duration(name)
+                    });
+            }
             mesh.animator.update(
                 crate::animation::Input {
                     speed: walker.speed,

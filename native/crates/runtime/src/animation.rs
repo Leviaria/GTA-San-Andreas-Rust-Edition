@@ -27,6 +27,8 @@ pub enum Motion {
     Fall,
     Land,
     Dead,
+    /// A full-body one-shot such as getting into a car.
+    Action,
 }
 
 impl Motion {
@@ -47,13 +49,14 @@ impl Motion {
             Motion::Fall => &["fall_fall", "jump_glide", "idle_stance"],
             Motion::Land => &["jump_land", "fall_land", "idle_stance"],
             Motion::Dead => &["ko_shot_front", "ko_skid_back"],
+            Motion::Action => &[],
         }
     }
 
     fn looped(self) -> bool {
         !matches!(
             self,
-            Motion::Stop | Motion::Jump | Motion::Land | Motion::Dead
+            Motion::Stop | Motion::Jump | Motion::Land | Motion::Dead | Motion::Action
         )
     }
 
@@ -86,7 +89,7 @@ pub struct Input {
 #[derive(Clone, Debug)]
 struct Track {
     motion: Motion,
-    clip: &'static str,
+    clip: String,
     seconds: f32,
     duration: f32,
     weight: f32,
@@ -103,6 +106,9 @@ pub struct Animator {
     civilian: bool,
     /// Clock offset for the first clip, so a crowd does not step in unison.
     start: f32,
+    /// An upper-body one-shot (firing, reloading, a punch, a flinch) laid
+    /// over whatever the legs are doing.
+    overlay: Option<Track>,
 }
 
 impl Default for Animator {
@@ -114,8 +120,21 @@ impl Default for Animator {
             jumped: false,
             civilian: false,
             start: 0.0,
+            overlay: None,
         }
     }
+}
+
+/// How quickly an overlay takes over and lets go of the arms.
+const OVERLAY_FADE: f32 = 0.08;
+
+fn first_clip<'a>(
+    names: &[&'a str],
+    duration: &impl Fn(&str) -> Option<f32>,
+) -> Option<(&'a str, f32)> {
+    names
+        .iter()
+        .find_map(|&name| duration(name).map(|d| (name, d)))
 }
 
 pub fn gait_for_speed(speed: f32) -> Motion {
@@ -144,8 +163,47 @@ impl Animator {
     }
 
     /// The clip that dominates the pose now.
-    pub fn clip(&self) -> &'static str {
-        self.tracks.last().map_or("idle_stance", |t| t.clip)
+    pub fn clip(&self) -> &str {
+        self.tracks.last().map_or("idle_stance", |t| &t.clip)
+    }
+
+    /// Plays the first clip that exists as a full-body one-shot that holds
+    /// off the gait until it ends. Returns its length, or `None` when the
+    /// ped has none of them.
+    pub fn perform(
+        &mut self,
+        names: &[&str],
+        duration: impl Fn(&str) -> Option<f32>,
+    ) -> Option<f32> {
+        let (clip, length) = first_clip(names, &duration)?;
+        self.tracks.push(Track {
+            motion: Motion::Action,
+            clip: clip.to_owned(),
+            seconds: 0.0,
+            duration: length,
+            weight: if self.tracks.is_empty() { 1.0 } else { 0.0 },
+        });
+        self.fade = 0.1;
+        Some(length)
+    }
+
+    /// Plays the first clip that exists on the spine and arms only, from
+    /// its start. Returns its length, or `None` when the ped has none.
+    pub fn overlay(
+        &mut self,
+        names: &[&str],
+        duration: impl Fn(&str) -> Option<f32>,
+    ) -> Option<f32> {
+        let (clip, length) = first_clip(names, &duration)?;
+        let weight = self.overlay.as_ref().map_or(0.0, |o| o.weight);
+        self.overlay = Some(Track {
+            motion: Motion::Action,
+            clip: clip.to_owned(),
+            seconds: 0.0,
+            duration: length,
+            weight,
+        });
+        Some(length)
     }
 
     pub fn reset(&mut self) {
@@ -165,7 +223,10 @@ impl Animator {
             .last()
             .is_some_and(|t| !t.motion.looped() && t.seconds >= t.duration);
         if input.dead {
+            self.overlay = None;
             self.play(Motion::Dead, 0.1, &duration);
+        } else if current == Motion::Action && !finished {
+            // Let a one-shot such as getting into a car play out.
         } else if input.grounded {
             let was_airborne = self.airborne;
             self.airborne = 0.0;
@@ -234,7 +295,7 @@ impl Animator {
         let first = self.tracks.is_empty();
         self.tracks.push(Track {
             motion,
-            clip,
+            clip: clip.to_owned(),
             seconds,
             duration: length,
             weight: if first { 1.0 } else { 0.0 },
@@ -275,22 +336,44 @@ impl Animator {
             let drop = self.tracks.len() - 4;
             self.tracks.drain(..drop);
         }
+        if let Some(overlay) = &mut self.overlay {
+            overlay.seconds += dt;
+            let left = overlay.duration - overlay.seconds;
+            overlay.weight = (overlay.weight + dt / OVERLAY_FADE)
+                .min(1.0)
+                .min(left / OVERLAY_FADE);
+            if left <= 0.0 {
+                self.overlay = None;
+            }
+        }
     }
 
     /// The clips to mix this frame, for `Ped::blend_with_clothing`.
-    pub fn plays(&self) -> Vec<Play<'static>> {
-        if self.tracks.is_empty() {
-            return vec![Play::looped("idle_stance", 0.0)];
-        }
-        self.tracks
+    pub fn plays(&self) -> Vec<Play<'_>> {
+        let mut plays: Vec<_> = self
+            .tracks
             .iter()
             .map(|t| Play {
-                clip: t.clip,
+                clip: &t.clip,
                 seconds: t.seconds,
                 weight: t.weight,
                 looped: t.motion.looped(),
+                upper_body: false,
             })
-            .collect()
+            .collect();
+        if plays.is_empty() {
+            plays.push(Play::looped("idle_stance", 0.0));
+        }
+        if let Some(o) = self.overlay.as_ref().filter(|o| o.weight > 0.0) {
+            plays.push(Play {
+                clip: &o.clip,
+                seconds: o.seconds,
+                weight: o.weight,
+                looped: false,
+                upper_body: true,
+            });
+        }
+        plays
     }
 }
 
@@ -353,8 +436,7 @@ mod tests {
         for _ in 0..15 {
             a.update(ground(WALK), DT, all);
         }
-        let walk = a.plays()[0];
-        let phase = walk.seconds / 1.0;
+        let phase = a.plays()[0].seconds / 1.0;
         a.update(ground(RUN), 0.0, all);
         let run = *a.plays().last().unwrap();
         assert_eq!(run.clip, "run_player");
@@ -460,11 +542,47 @@ mod tests {
             a.update(dead, DT, all);
         }
         assert_eq!(a.motion(), Motion::Dead);
-        let last = *a.plays().last().unwrap();
+        let plays = a.plays();
+        let last = plays.last().unwrap();
         assert!(!last.looped && last.seconds <= 1.0);
         let mut none = Animator::civilian(0.0);
         none.update(dead, DT, minimal);
         assert_ne!(none.motion(), Motion::Dead, "no death clip to play");
+    }
+
+    #[test]
+    fn overlays_ride_on_the_gait_and_end_by_themselves() {
+        let mut a = Animator::default();
+        for _ in 0..30 {
+            a.update(ground(RUN), DT, all);
+        }
+        assert_eq!(a.overlay(&["colt45_fire"], all), Some(1.0));
+        assert_eq!(a.overlay(&["missing"], minimal), None);
+        a.update(ground(RUN), DT, all);
+        let plays = a.plays();
+        assert_eq!(plays.len(), 2);
+        assert!(plays[1].upper_body && plays[1].clip == "colt45_fire");
+        assert_eq!(a.clip(), "run_player", "legs keep running");
+        for _ in 0..70 {
+            a.update(ground(RUN), DT, all);
+        }
+        assert_eq!(a.plays().len(), 1, "overlay ended");
+    }
+
+    #[test]
+    fn actions_hold_off_the_gait_until_they_end() {
+        let mut a = Animator::default();
+        a.update(ground(0.0), DT, all);
+        assert_eq!(a.perform(&["car_getin_lhs"], all), Some(1.0));
+        for _ in 0..30 {
+            a.update(ground(0.0), DT, all);
+        }
+        assert_eq!(a.clip(), "car_getin_lhs");
+        for _ in 0..60 {
+            a.update(ground(0.0), DT, all);
+        }
+        assert_eq!(a.motion(), Motion::Idle);
+        assert_eq!(a.perform(&["nope"], minimal), None);
     }
 
     #[test]

@@ -148,6 +148,8 @@ pub struct Play<'a> {
     pub seconds: f32,
     pub weight: f32,
     pub looped: bool,
+    /// Moves only the spine, head and arms, over the full-body clips.
+    pub upper_body: bool,
 }
 impl<'a> Play<'a> {
     pub fn looped(clip: &'a str, seconds: f32) -> Self {
@@ -156,12 +158,16 @@ impl<'a> Play<'a> {
             seconds,
             weight: 1.0,
             looped: true,
+            upper_body: false,
         }
     }
 }
 pub struct Ped {
     model: sa_assets::skin::Model,
     clips: sa_assets::ifp::Package,
+    /// Extra animation packages shared by every ped, such as a weapon's
+    /// clips from anim.img.
+    extra: Vec<std::sync::Arc<sa_assets::ifp::Package>>,
     height_offset: f32,
     textures: HashMap<String, Texture>,
     clothing: Vec<Clothing>,
@@ -196,6 +202,7 @@ impl Ped {
         let mut ped = Self {
             model: source.model,
             clips,
+            extra: Vec::new(),
             height_offset: 0.0,
             textures: HashMap::new(),
             clothing: source.clothing,
@@ -287,9 +294,25 @@ impl Ped {
     pub fn frame(&self, name: &str, seconds: f32) -> Result<Vec<Batch>> {
         self.frame_with_clothing(name, seconds, self.clothing_mask())
     }
-    /// Length in seconds of a clip in this ped's animation package.
+    fn find_clip(&self, name: &str) -> Option<&sa_assets::ifp::Clip> {
+        self.clips
+            .clip(name)
+            .or_else(|| self.extra.iter().find_map(|p| p.clip(name)))
+    }
+    /// Length in seconds of a clip in this ped's animation packages.
     pub fn clip_duration(&self, name: &str) -> Option<f32> {
-        self.clips.clip(name).map(|c| c.duration)
+        self.find_clip(name).map(|c| c.duration)
+    }
+    /// Makes another package's clips playable on this ped. Adding the same
+    /// package twice does nothing.
+    pub fn share_clips(&mut self, package: &std::sync::Arc<sa_assets::ifp::Package>) {
+        if !self
+            .extra
+            .iter()
+            .any(|p| std::sync::Arc::ptr_eq(p, package))
+        {
+            self.extra.push(package.clone());
+        }
     }
     /// Local bone matrices for a mix of clips. Clips the package lacks are
     /// skipped; it is an error only when none of them exist.
@@ -297,17 +320,16 @@ impl Ped {
         let layers: Vec<_> = plays
             .iter()
             .filter_map(|play| {
-                self.clips
-                    .clip(play.clip)
-                    .map(|clip| sa_assets::ifp::Layer {
-                        clip,
-                        seconds: play.seconds,
-                        weight: play.weight,
-                        looped: play.looped,
-                    })
+                self.find_clip(play.clip).map(|clip| sa_assets::ifp::Layer {
+                    clip,
+                    seconds: play.seconds,
+                    weight: play.weight,
+                    looped: play.looped,
+                    upper_body: play.upper_body,
+                })
             })
             .collect();
-        ensure!(!layers.is_empty(), "missing ped clip");
+        ensure!(layers.iter().any(|l| !l.upper_body), "missing ped clip");
         sa_assets::ifp::blend_pose(&self.model, &layers, true)
     }
     pub fn clothing_mask(&self) -> u16 {

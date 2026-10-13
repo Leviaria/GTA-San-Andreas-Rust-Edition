@@ -233,6 +233,11 @@ struct State {
     traffic: traffic::Traffic,
     arsenal: weapons::Arsenal,
     arsenal_loaded: bool,
+    weapon_anims: std::collections::HashMap<String, Option<weapons::WeaponAnims>>,
+    punch_cooldown: f32,
+    punches: usize,
+    /// Seconds left of the get-in animation before the player drives.
+    entering_car: Option<f32>,
     /// Weapon model id to (model, txd), and the meshes of guns drawn so far.
     weapon_models: Option<std::collections::HashMap<i32, (String, String)>>,
     gun_meshes: std::collections::HashMap<i32, Option<Vec<GpuBatch>>>,
@@ -264,7 +269,6 @@ struct State {
     ped: Option<(sa_scene::ped::Ped, Vec<GpuBatch>)>,
     third_person: bool,
     ped_visible: bool,
-    ped_clip: &'static str,
     ped_animator: animation::Animator,
     ped_yaw: f32,
 }
@@ -416,19 +420,52 @@ impl State {
         if !self.driving && self.try_passenger(false) {
             return;
         }
+        if self.entering_car.is_some() {
+            return;
+        }
         let mut steal = false;
         if let (Some(world), Some((car, _))) = (&self.collision, &mut self.car) {
             if self.driving {
                 if let Some(player) = car.exit_player(world) {
                     self.position = player.eye();
+                    // Step out facing the way the car points.
+                    self.ped_yaw = car.yaw;
+                    self.ped_animator.reset();
+                    if let Some((ped, _)) = &self.ped {
+                        self.ped_animator
+                            .perform(&["car_getout_lhs", "car_getout_rhs"], |name| {
+                                ped.clip_duration(name)
+                            });
+                    }
                     self.player = Some(player);
                     self.driving = false;
                     self.walking = true;
                 }
                 car.stop();
             } else if self.position.distance(car.position) < 6.0 {
-                self.driving = true;
-                self.network_car_spawned = true;
+                // Turn to the car and climb in before driving off.
+                let feet = self.player.as_ref().map_or(self.position, |p| p.feet);
+                let to_car = car.position - feet;
+                let climb =
+                    self.ped
+                        .as_ref()
+                        .zip(self.player.as_ref())
+                        .and_then(|((ped, _), _)| {
+                            self.ped_animator
+                                .perform(&["car_getin_lhs", "car_getin_rhs"], |name| {
+                                    ped.clip_duration(name)
+                                })
+                        });
+                match climb.filter(|_| self.walking && self.third_person) {
+                    Some(length) => {
+                        self.ped_yaw = to_car.x.atan2(to_car.z);
+                        self.entering_car = Some(length.min(1.2));
+                    }
+                    None => {
+                        self.driving = true;
+                        self.network_car_spawned = true;
+                    }
+                }
             } else {
                 steal = true;
             }
@@ -945,6 +982,10 @@ impl State {
             traffic: traffic::Traffic::default(),
             arsenal: weapons::Arsenal::default(),
             arsenal_loaded: false,
+            weapon_anims: std::collections::HashMap::new(),
+            punch_cooldown: 0.0,
+            punches: 0,
+            entering_car: None,
             weapon_models: None,
             gun_meshes: std::collections::HashMap::new(),
             gun_drawn: None,
@@ -969,7 +1010,6 @@ impl State {
             ped: None,
             third_person: true,
             ped_visible: true,
-            ped_clip: "idle_stance",
             ped_animator: animation::Animator::default(),
             ped_yaw: 0.0,
         };
@@ -1423,7 +1463,22 @@ impl State {
                     world.clip_camera(car.position + Vec3::Y, car.position + Vec3::Y + offset);
             }
         } else if self.walking {
+            if let Some(left) = &mut self.entering_car {
+                *left -= dt;
+                if *left <= 0.0 {
+                    self.entering_car = None;
+                    self.driving = true;
+                    self.network_car_spawned = true;
+                    self.keys.clear();
+                }
+            }
             if let (Some(world), Some(player)) = (&self.collision, &mut self.player) {
+                // Stand still while climbing into the car.
+                let motion = if self.entering_car.is_some() {
+                    Vec3::ZERO
+                } else {
+                    motion
+                };
                 let direction = Vec3::new(motion.x, 0.0, motion.z).clamp_length_max(1.0);
                 let gait = if self.gamepad.sprint
                     || self.keys.contains(&KeyCode::ShiftLeft)
@@ -1484,7 +1539,6 @@ impl State {
                         dt,
                         |name| ped.clip_duration(name),
                     );
-                    self.ped_clip = self.ped_animator.clip();
                     if aiming {
                         // Aiming turns CJ to face where the camera looks.
                         self.ped_yaw = locomotion::turn_toward(self.ped_yaw, self.yaw, dt);
@@ -3683,7 +3737,11 @@ impl ApplicationHandler for App {
                         _ => None,
                     };
                     if let Some(label) = label {
-                        assert_eq!(state.ped_clip, label, "ped clip selection failed");
+                        assert_eq!(
+                            state.ped_animator.clip(),
+                            label,
+                            "ped clip selection failed"
+                        );
                         if let Some(directory) = &self.capture_dir {
                             state.capture_next = Some(directory.join(format!("ped-{label}.png")));
                         }
