@@ -1429,7 +1429,7 @@ impl Menu {
                             for name in &self.network_players{ui.label(name);}
                             ui.add_space(12.0);
                             ui.label(if self.relay_mode {"Both players connect out to the relay. The game host needs no port forwarding. A reachable relay service is required; no public relay is configured by default. Prototype: use a trusted network."} else {"For LAN, join the host's local IP. Over the internet, direct hosting requires TCP port forwarding."});
-                            ui.label("Players, chosen vehicles and outfits are shared. Cars remain visible after parking; press G to ride with someone. Cars bump into each other, including other players' cars. Spawned NPCs and traffic are local to each player.");
+                            ui.label("Players, chosen vehicles and outfits are shared. Cars remain visible after parking; press G to ride with someone. Cars bump into each other, including other players' cars. Traffic is shared with nearby players; spawned NPCs are local.");
                             });
                         }
                         Page::Commands=>{

@@ -494,28 +494,42 @@ fn settle(
     let (a, b) = (world(roads, car.from), world(roads, car.to));
     let t = (car.along / flat_length(a, b)).clamp(0.0, 1.0);
     let path = a.y + (b.y - a.y) * t;
-    let forward = car.forward();
+    let (on_ground, roll) = surface(ground, car.position, path, car.yaw, car.size);
+    let (ground_y, pitch) = on_ground.unwrap_or((path, (b.y - a.y).atan2(flat_length(a, b))));
+    car.position.y = ground_y;
+    car.pitch = pitch + (accel * 0.004).clamp(-0.04, 0.04);
+    car.roll = roll + (lateral * 0.006).clamp(-0.06, 0.06);
+}
+
+/// Height and pitch of a car body on the road under its axles, and its roll
+/// from the wheels on either side. `near` is roughly where the road is: only
+/// ground close to it counts, never a bridge overhead.
+pub(super) fn surface(
+    ground: &impl Fn(Vec3, f32) -> Option<f32>,
+    position: Vec3,
+    near: f32,
+    yaw: f32,
+    size: [f32; 3],
+) -> (Option<(f32, f32)>, f32) {
+    let forward = Vec3::new(yaw.sin(), 0.0, yaw.cos());
     let side = Vec3::new(forward.z, 0.0, -forward.x);
-    let axle = car.size[1] * 0.65;
-    let track = car.size[0] * 0.8;
-    // Only accept ground near the path, never a bridge overhead.
+    let axle = size[1] * 0.65;
+    let track = size[0] * 0.8;
     let height = |offset: Vec3| {
-        let at = Vec3::new(car.position.x, path, car.position.z) + offset;
-        ground(at, path + 2.0).filter(|y| *y > path - 4.0)
+        let at = Vec3::new(position.x, near, position.z) + offset;
+        ground(at, near + 2.0).filter(|y| *y > near - 4.0)
     };
     let (front, rear) = (height(forward * axle), height(-forward * axle));
     let (left, right) = (height(-side * track), height(side * track));
-    let (ground_y, pitch) = match (front, rear) {
-        (Some(f), Some(r)) => ((f + r) / 2.0, (f - r).atan2(axle * 2.0)),
-        _ => (path, (b.y - a.y).atan2(flat_length(a, b))),
+    let body = match (front, rear) {
+        (Some(f), Some(r)) => Some(((f + r) / 2.0, (f - r).atan2(axle * 2.0))),
+        _ => None,
     };
     let roll = match (left, right) {
         (Some(l), Some(r)) => (r - l).atan2(track * 2.0),
         _ => 0.0,
     };
-    car.position.y = ground_y;
-    car.pitch = pitch + (accel * 0.004).clamp(-0.04, 0.04);
-    car.roll = roll + (lateral * 0.006).clamp(-0.06, 0.06);
+    (body, roll)
 }
 
 fn length_of(roads: &RoadGraph, from: u32, to: u32) -> f32 {
@@ -610,13 +624,15 @@ impl State {
         }
         // Stop for people crossing too.
         blocked.extend(self.crowd.walkers.iter().map(|w| Footprint::person(w.feet)));
+        blocked.extend(self.traffic_with_right_of_way());
+        let taken = self.traffic_owners_before_us();
         let added = self.traffic.update(
             roads,
             &Surroundings {
                 player,
                 blocked: &blocked,
                 ground: |at, max| self.collision.as_ref()?.ground_below(at, max),
-                taken: &[],
+                taken: &taken,
             },
             &self.traffic_models,
             limit,

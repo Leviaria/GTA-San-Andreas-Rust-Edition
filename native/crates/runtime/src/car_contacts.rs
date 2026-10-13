@@ -124,6 +124,9 @@ impl State {
                 Vec3::new(car.yaw.sin(), 0.0, car.yaw.cos()) * car.speed,
             ));
         }
+        for car in &self.remote_traffic {
+            cars.push((Owner::Remote, car.footprint(), car.velocity()));
+        }
         for actor in self.remote_actors.iter().filter(|a| a.car_visible) {
             if let Some(car) = actor.current.vehicle {
                 let forward = Vec3::new(car.yaw.sin(), 0.0, car.yaw.cos());

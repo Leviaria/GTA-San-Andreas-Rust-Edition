@@ -28,6 +28,7 @@ mod server_events;
 mod session_resources;
 mod settings;
 mod shadow;
+mod shared_traffic;
 mod skids;
 mod streaming;
 mod traffic;
@@ -250,6 +251,7 @@ struct State {
     ped_paths: Option<sa_scene::roads::RoadGraph>,
     ped_paths_tried: bool,
     traffic_meshes: Vec<traffic::TrafficMesh>,
+    remote_traffic: Vec<shared_traffic::RemoteTraffic>,
     /// Catalog indices traffic may use, and the catalog size they were built for.
     traffic_models: Vec<usize>,
     traffic_models_for: usize,
@@ -955,6 +957,7 @@ impl State {
             ped_paths: None,
             ped_paths_tried: false,
             traffic_meshes: Vec::new(),
+            remote_traffic: Vec::new(),
             traffic_models: Vec::new(),
             traffic_models_for: usize::MAX,
             network_revision: 0,
@@ -1594,6 +1597,7 @@ impl State {
         }
         self.update_network();
         self.update_traffic(dt);
+        self.update_shared_traffic(dt);
         self.update_crowd(dt);
         self.update_weapons(dt);
         let camera_time = self.animation.as_ref().and_then(|cut| {
@@ -1771,6 +1775,7 @@ impl State {
             .chain(self.car.iter().flat_map(|(_, b)| b))
             .chain(self.spawned_peds.iter().flat_map(|p| &p.batches))
             .chain(self.traffic_meshes.iter().flat_map(|m| &m.batches))
+            .chain(self.remote_traffic.iter().flat_map(|c| &c.batches))
             .chain(self.crowd_meshes.iter().flat_map(|m| &m.batches))
             .chain(
                 self.remote_actors
