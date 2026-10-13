@@ -272,6 +272,7 @@ fn place(walker: &mut Walker, paths: &RoadGraph) {
 pub(super) struct WalkerMesh {
     id: u64,
     pub batches: Vec<GpuBatch>,
+    animator: crate::animation::Animator,
 }
 
 impl State {
@@ -341,14 +342,14 @@ impl State {
                 Some((_, batches)) => self.crowd_meshes.push(WalkerMesh {
                     id,
                     batches: crate::multiplayer::duplicate(&self.device, batches),
+                    animator: crate::animation::Animator::civilian((id % 17) as f32 * 0.13),
                 }),
                 None => {
                     self.crowd.walkers.remove(index);
                 }
             }
         }
-        let seconds = self.npc_seconds;
-        for mesh in &self.crowd_meshes {
+        for mesh in &mut self.crowd_meshes {
             let Some(walker) = self.crowd.walkers.iter().find(|w| w.id == mesh.id) else {
                 continue;
             };
@@ -360,24 +361,23 @@ impl State {
                     .and_then(|p| p.as_ref())
             };
             let Some((ped, _)) = source else { continue };
-            // Offset each walker's clock so a crowd does not step in unison.
-            let time = seconds + (walker.id % 17) as f32 * 0.13;
-            let posed = if walker.dead_for.is_some() {
-                ped.frame("idle_stance", 0.0)
-            } else if walker.speed > 2.5 {
-                ped.frame("run_civi", time)
-                    .or_else(|_| ped.frame("run_player", time))
-            } else if walker.speed > 0.0 {
-                ped.frame("walk_civi", time)
-                    .or_else(|_| ped.frame("walk_player", time))
-            } else {
-                ped.frame("idle_stance", time)
-            };
+            mesh.animator.update(
+                crate::animation::Input {
+                    speed: walker.speed,
+                    grounded: true,
+                    dead: walker.dead_for.is_some(),
+                    ..Default::default()
+                },
+                dt,
+                |name| ped.clip_duration(name),
+            );
+            let dying = mesh.animator.motion() == crate::animation::Motion::Dead;
+            let posed = ped.blend_with_clothing(&mesh.animator.plays(), ped.clothing_mask());
             let Ok(posed) = posed else { continue };
             let mut rotation = Quat::from_rotation_y(walker.yaw + std::f32::consts::PI);
             let mut feet = walker.feet;
-            if let Some(dead) = walker.dead_for {
-                // Topple backwards over half a second and lie on the ground.
+            if let Some(dead) = walker.dead_for.filter(|_| !dying) {
+                // Without a death clip, topple backwards over half a second and lie on the ground.
                 let fall = (dead / 0.5).min(1.0) * std::f32::consts::FRAC_PI_2;
                 rotation *= Quat::from_rotation_x(fall);
                 feet += Vec3::Y * 0.15 * (fall / std::f32::consts::FRAC_PI_2);
