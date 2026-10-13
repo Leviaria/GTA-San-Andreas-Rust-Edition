@@ -435,7 +435,7 @@ impl State {
         self.keys.clear();
         self.car_render_pose = None;
         self.ped_clip = "idle_stance";
-        self.ped_seconds = 0.0;
+        self.ped_animator.reset();
         self.ped_visible = false;
         world
     }

@@ -45,19 +45,6 @@ pub fn turn_toward(_yaw: f32, target: f32, _dt: f32) -> f32 {
     target
 }
 
-/// The ped.ifp clip that matches a horizontal speed.
-pub fn clip_for_speed(speed: f32) -> &'static str {
-    if speed < 0.15 {
-        "idle_stance"
-    } else if speed < (WALK + RUN) * 0.5 {
-        "walk_player"
-    } else if speed < (RUN + SPRINT) * 0.5 {
-        "run_player"
-    } else {
-        "sprint_civi"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,13 +63,5 @@ mod tests {
         assert_eq!(l.update(Vec3::X, Gait::Walk, DT).length(), WALK);
         assert_eq!(l.update(Vec3::X, Gait::Sprint, DT).length(), SPRINT);
         assert!((l.update(Vec3::X * 0.5, Gait::Run, DT).length() - RUN * 0.5).abs() < 1e-5);
-    }
-
-    #[test]
-    fn clips_follow_speed() {
-        assert_eq!(clip_for_speed(0.0), "idle_stance");
-        assert_eq!(clip_for_speed(WALK), "walk_player");
-        assert_eq!(clip_for_speed(RUN), "run_player");
-        assert_eq!(clip_for_speed(SPRINT), "sprint_civi");
     }
 }

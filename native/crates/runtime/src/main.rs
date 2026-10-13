@@ -5,6 +5,7 @@ use sa_scene::{
     Scene,
 };
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
+mod animation;
 mod capture;
 mod car_contacts;
 mod chat;
@@ -263,8 +264,8 @@ struct State {
     ped: Option<(sa_scene::ped::Ped, Vec<GpuBatch>)>,
     third_person: bool,
     ped_visible: bool,
-    ped_seconds: f32,
     ped_clip: &'static str,
+    ped_animator: animation::Animator,
     ped_yaw: f32,
 }
 impl State {
@@ -968,8 +969,8 @@ impl State {
             ped: None,
             third_person: true,
             ped_visible: true,
-            ped_seconds: 0.0,
             ped_clip: "idle_stance",
+            ped_animator: animation::Animator::default(),
             ped_yaw: 0.0,
         };
         if !first_model && state.animation.is_none() {
@@ -1472,16 +1473,18 @@ impl State {
                     let horizontal = Vec3::new(delta.x, 0.0, delta.z);
                     let speed = horizontal.length() / dt;
                     let aiming = self.aim_held && self.arsenal.held().is_some();
-                    let clip = if aiming && speed < 0.15 {
-                        "gun_stand"
-                    } else {
-                        locomotion::clip_for_speed(speed)
-                    };
-                    if clip != self.ped_clip {
-                        self.ped_clip = clip;
-                        self.ped_seconds = 0.0;
-                    }
-                    self.ped_seconds += dt;
+                    self.ped_animator.update(
+                        animation::Input {
+                            speed,
+                            grounded: player.grounded,
+                            vertical_speed: player.vertical_speed,
+                            dead: false,
+                            aiming,
+                        },
+                        dt,
+                        |name| ped.clip_duration(name),
+                    );
+                    self.ped_clip = self.ped_animator.clip();
                     if aiming {
                         // Aiming turns CJ to face where the camera looks.
                         self.ped_yaw = locomotion::turn_toward(self.ped_yaw, self.yaw, dt);
@@ -1493,11 +1496,8 @@ impl State {
                         );
                     }
                 }
-                // Not every ped.ifp has a sprint clip; jog through it instead.
-                let posed = ped
-                    .frame(self.ped_clip, self.ped_seconds)
-                    .or_else(|_| ped.frame("run_player", self.ped_seconds))
-                    .or_else(|_| ped.frame("idle_stance", self.ped_seconds));
+                let posed =
+                    ped.blend_with_clothing(&self.ped_animator.plays(), ped.clothing_mask());
                 match posed {
                     Ok(posed) => {
                         let rotation = Quat::from_rotation_y(self.ped_yaw + std::f32::consts::PI);

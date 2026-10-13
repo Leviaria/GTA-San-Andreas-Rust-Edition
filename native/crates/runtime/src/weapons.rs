@@ -187,11 +187,7 @@ impl State {
         else {
             return;
         };
-        let Ok(hand) = ped
-            .bone_matrix(self.ped_clip, self.ped_seconds, RIGHT_HAND)
-            .or_else(|_| ped.bone_matrix("run_player", self.ped_seconds, RIGHT_HAND))
-            .or_else(|_| ped.bone_matrix("idle_stance", self.ped_seconds, RIGHT_HAND))
-        else {
+        let Ok(hand) = ped.bone_matrix_blend(&self.ped_animator.plays(), RIGHT_HAND) else {
             return;
         };
         let body = glam::Mat4::from_rotation_translation(

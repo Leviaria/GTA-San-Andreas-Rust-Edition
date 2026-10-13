@@ -134,6 +134,9 @@ pub(super) struct RemoteActor {
     pub car_model: usize,
     model_changed: Instant,
     car_render_pose: Option<VehiclePose>,
+    /// Clips for the remote ped, driven by how fast it moves on screen.
+    animator: crate::animation::Animator,
+    animated: Option<(Instant, Vec3)>,
 }
 pub(super) fn duplicate(device: &wgpu::Device, batches: &[GpuBatch]) -> Vec<GpuBatch> {
     batches
@@ -449,6 +452,8 @@ impl State {
             car_model: car_index,
             model_changed: Instant::now(),
             car_render_pose: None,
+            animator: crate::animation::Animator::default(),
+            animated: None,
         })
     }
     fn appearance_indices(&self, pose: Pose) -> Option<(usize, usize)> {
@@ -726,16 +731,34 @@ impl State {
                     .get(actor.ped_model)
                     .and_then(|p| p.as_ref())
             } {
-                let clip = if pose.moving {
-                    "walk_player"
-                } else {
-                    "idle_stance"
+                // Only position comes over the network, so speed and jumps
+                // are read from how far the ped moved since the last frame.
+                let (dt, velocity) = match actor.animated {
+                    Some((at, last)) => {
+                        let dt = now.duration_since(at).as_secs_f32().max(1e-3);
+                        (dt, (feet - last) / dt)
+                    }
+                    None => (0.0, Vec3::ZERO),
                 };
-                if let Ok(posed) = ped.frame_with_clothing(
-                    clip,
-                    now.duration_since(self.started).as_secs_f32(),
-                    pose.clothes,
-                ) {
+                actor.animated = Some((now, feet));
+                let horizontal = Vec3::new(velocity.x, 0.0, velocity.z).length();
+                actor.animator.update(
+                    crate::animation::Input {
+                        // An old client only says moving or not.
+                        speed: if pose.moving && horizontal < 0.15 {
+                            crate::locomotion::WALK
+                        } else {
+                            horizontal
+                        },
+                        grounded: (-4.0..2.0).contains(&velocity.y),
+                        vertical_speed: velocity.y,
+                        dead: false,
+                        aiming: false,
+                    },
+                    dt,
+                    |name| ped.clip_duration(name),
+                );
+                if let Ok(posed) = ped.blend_with_clothing(&actor.animator.plays(), pose.clothes) {
                     for (mesh, batch) in posed.iter().zip(&actor.ped) {
                         if mesh.vertices.len() * 9 != batch.base.len() {
                             continue;

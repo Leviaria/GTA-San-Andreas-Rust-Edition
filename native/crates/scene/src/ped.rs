@@ -141,6 +141,24 @@ impl Source {
             })
     }
 }
+/// One clip's share of a ped pose, by name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Play<'a> {
+    pub clip: &'a str,
+    pub seconds: f32,
+    pub weight: f32,
+    pub looped: bool,
+}
+impl<'a> Play<'a> {
+    pub fn looped(clip: &'a str, seconds: f32) -> Self {
+        Self {
+            clip,
+            seconds,
+            weight: 1.0,
+            looped: true,
+        }
+    }
+}
 pub struct Ped {
     model: sa_assets::skin::Model,
     clips: sa_assets::ifp::Package,
@@ -269,6 +287,29 @@ impl Ped {
     pub fn frame(&self, name: &str, seconds: f32) -> Result<Vec<Batch>> {
         self.frame_with_clothing(name, seconds, self.clothing_mask())
     }
+    /// Length in seconds of a clip in this ped's animation package.
+    pub fn clip_duration(&self, name: &str) -> Option<f32> {
+        self.clips.clip(name).map(|c| c.duration)
+    }
+    /// Local bone matrices for a mix of clips. Clips the package lacks are
+    /// skipped; it is an error only when none of them exist.
+    fn locals(&self, plays: &[Play]) -> Result<Vec<sa_assets::skin::Matrix>> {
+        let layers: Vec<_> = plays
+            .iter()
+            .filter_map(|play| {
+                self.clips
+                    .clip(play.clip)
+                    .map(|clip| sa_assets::ifp::Layer {
+                        clip,
+                        seconds: play.seconds,
+                        weight: play.weight,
+                        looped: play.looped,
+                    })
+            })
+            .collect();
+        ensure!(!layers.is_empty(), "missing ped clip");
+        sa_assets::ifp::blend_pose(&self.model, &layers, true)
+    }
     pub fn clothing_mask(&self) -> u16 {
         self.clothing
             .iter()
@@ -285,13 +326,11 @@ impl Ped {
         seconds: f32,
         clothes: u16,
     ) -> Result<Vec<Batch>> {
-        let clip = self
-            .clips
-            .clips
-            .iter()
-            .find(|c| c.name == name)
-            .context("missing ped clip")?;
-        let locals = clip.pose(&self.model, seconds, true)?;
+        self.blend_with_clothing(&[Play::looped(name, seconds)], clothes)
+    }
+    /// A blended pose: each play is a clip, its time and its share.
+    pub fn blend_with_clothing(&self, plays: &[Play], clothes: u16) -> Result<Vec<Batch>> {
+        let locals = self.locals(plays)?;
         let geometry = self.model.pose(&locals)?;
         let placement = placement(0, 0, [0.0, 0.0, self.height_offset], [0.0, 0.0, 0.0, 1.0])?;
         let mut batches = HashMap::new();
@@ -334,13 +373,11 @@ impl Ped {
     /// the way `load_weapon_model` builds it into the hand, in the same space
     /// as the vertices `frame` returns.
     pub fn bone_matrix(&self, name: &str, seconds: f32, bone_id: i32) -> Result<glam::Mat4> {
-        let clip = self
-            .clips
-            .clips
-            .iter()
-            .find(|c| c.name == name)
-            .context("missing ped clip")?;
-        let locals = clip.pose(&self.model, seconds, true)?;
+        self.bone_matrix_blend(&[Play::looped(name, seconds)], bone_id)
+    }
+    /// `bone_matrix` for a blended pose.
+    pub fn bone_matrix_blend(&self, plays: &[Play], bone_id: i32) -> Result<glam::Mat4> {
+        let locals = self.locals(plays)?;
         let world = self.model.world_matrices(&locals)?;
         let frame = self
             .model
