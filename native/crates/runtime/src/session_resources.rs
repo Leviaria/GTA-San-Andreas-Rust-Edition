@@ -434,8 +434,8 @@ impl State {
         crate::metrics::session_memory("world swap");
         self.keys.clear();
         self.car_render_pose = None;
-        self.ped_clip = "idle_stance";
         self.ped_animator.reset();
+        self.entering_car = None;
         self.ped_visible = false;
         world
     }

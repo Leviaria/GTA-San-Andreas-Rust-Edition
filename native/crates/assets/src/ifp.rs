@@ -7,11 +7,13 @@ pub struct Key {
     pub rotation: [f32; 4],
     pub translation: Option<[f32; 3]>,
 }
+#[derive(Clone)]
 pub struct Track {
     pub name: String,
     pub bone_id: i32,
     pub keys: Vec<Key>,
 }
+#[derive(Clone)]
 pub struct Clip {
     pub name: String,
     pub duration: f32,
@@ -207,6 +209,15 @@ pub struct Layer<'a> {
     pub weight: f32,
     /// Looping clips wrap their time; one-shots hold their last frame.
     pub looped: bool,
+    /// An overlay on the spine, head and arms only (firing, reloading,
+    /// punching while the legs keep walking). Its weight is how far it
+    /// takes those bones away from the full-body layers.
+    pub upper_body: bool,
+}
+/// Bones an upper-body overlay may move: spine, neck, head and face, both
+/// arms and hands. Pelvis, root and legs stay with the gait.
+pub fn is_upper_body(bone_id: i32) -> bool {
+    matches!(bone_id, 2..=8 | 21..=26 | 31..=36 | 301 | 302)
 }
 fn quaternion_of(m: &skin::Matrix) -> [f32; 4] {
     // Columns are m[0..3], m[3..6], m[6..9]; R(row, col) = m[col * 3 + row].
@@ -260,9 +271,30 @@ fn write_rotation(matrix: &mut skin::Matrix, [x, y, z, w]: [f32; 4]) {
         1.0 - 2.0 * (x * x + y * y),
     ]);
 }
-/// Mixes several clips into one set of local bone matrices. Rotations are
-/// blended as weighted, sign-aligned quaternions and translations linearly;
-/// a bone a clip does not animate keeps its bind pose for that clip's share.
+fn layer_seconds(layer: &Layer) -> f32 {
+    let clip = layer.clip;
+    if clip.duration <= 0.0 {
+        0.0
+    } else if layer.looped {
+        layer.seconds.rem_euclid(clip.duration)
+    } else {
+        layer.seconds.clamp(0.0, clip.duration)
+    }
+}
+fn frame_of(model: &skin::Model, bone_id: i32) -> Option<usize> {
+    model.frames.iter().position(|f| f.bone_id == Some(bone_id))
+}
+fn nlerp(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+    let q: [f32; 4] = std::array::from_fn(|i| a[i] * (1.0 - t) + b[i] * sign * t);
+    let norm = q.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-6);
+    q.map(|v| v / norm)
+}
+/// Mixes several clips into one set of local bone matrices. Full-body
+/// layers are blended as weighted, sign-aligned quaternions and linear
+/// translations, and a bone a clip does not animate keeps its bind pose for
+/// that clip's share. Upper-body layers are then laid over the result.
 /// Root movement is optionally removed in XY while preserving vertical bob.
 pub fn blend_pose(
     model: &skin::Model,
@@ -270,55 +302,55 @@ pub fn blend_pose(
     in_place: bool,
 ) -> Result<Vec<skin::Matrix>> {
     let mut pose = model.bind_pose();
-    let total: f32 = layers.iter().map(|l| l.weight.max(0.0)).sum();
     ensure!(
         layers
             .iter()
             .all(|l| l.seconds.is_finite() && l.weight.is_finite()),
         "nonfinite clip time or weight"
     );
-    if total <= 0.0 {
-        return Ok(pose);
-    }
-    // Per frame: summed quaternion, summed translation, weight that had a key.
-    let mut rotations = vec![[0.0f32; 4]; pose.len()];
-    let mut translations = vec![[0.0f32; 3]; pose.len()];
-    let mut rotated = vec![0.0f32; pose.len()];
-    let mut moved = vec![0.0f32; pose.len()];
-    let mut bind = vec![None; pose.len()];
-    for layer in layers.iter().filter(|l| l.weight > 0.0) {
+    let full: Vec<_> = layers
+        .iter()
+        .filter(|l| !l.upper_body && l.weight > 0.0)
+        .collect();
+    let total: f32 = full.iter().map(|l| l.weight).sum();
+    let bind: Vec<[f32; 4]> = pose.iter().map(quaternion_of).collect();
+    let count = pose.len();
+    let mut rotations = vec![[0.0f32; 4]; count];
+    let mut translations = vec![[0.0f32; 3]; count];
+    let mut rotated = vec![0.0f32; count];
+    let mut moved = vec![0.0f32; count];
+    let fix_root = |bone_id: i32, mut position: [f32; 3]| {
+        if in_place && bone_id == 0 {
+            position[0] = 0.0;
+            position[1] = 0.0;
+        }
+        position
+    };
+    for layer in &full {
         let weight = layer.weight / total;
-        let clip = layer.clip;
-        let seconds = if clip.duration <= 0.0 {
-            0.0
-        } else if layer.looped {
-            layer.seconds.rem_euclid(clip.duration)
-        } else {
-            layer.seconds.clamp(0.0, clip.duration)
-        };
-        for track in &clip.tracks {
+        let seconds = layer_seconds(layer);
+        for track in &layer.clip.tracks {
             ensure!(!track.keys.is_empty(), "empty sampled track");
-            let Some(frame) = model
-                .frames
-                .iter()
-                .position(|f| f.bone_id == Some(track.bone_id))
-            else {
+            let Some(frame) = frame_of(model, track.bone_id) else {
                 continue;
             };
             let key = track.sample(seconds);
-            let reference = *bind[frame].get_or_insert_with(|| quaternion_of(&pose[frame]));
-            let dot: f32 = key.rotation.iter().zip(reference).map(|(a, b)| a * b).sum();
+            let dot: f32 = key
+                .rotation
+                .iter()
+                .zip(bind[frame])
+                .map(|(a, b)| a * b)
+                .sum();
             let sign = if dot < 0.0 { -1.0 } else { 1.0 };
             for (sum, value) in rotations[frame].iter_mut().zip(key.rotation) {
                 *sum += value * sign * weight;
             }
             rotated[frame] += weight;
-            if let Some(mut position) = key.translation {
-                if in_place && track.bone_id == 0 {
-                    position[0] = 0.0;
-                    position[1] = 0.0;
-                }
-                for (sum, value) in translations[frame].iter_mut().zip(position) {
+            if let Some(position) = key.translation {
+                for (sum, value) in translations[frame]
+                    .iter_mut()
+                    .zip(fix_root(track.bone_id, position))
+                {
                     *sum += value * weight;
                 }
                 moved[frame] += weight;
@@ -330,8 +362,7 @@ pub fn blend_pose(
             let mut rotation = rotations[frame];
             let rest = 1.0 - rotated[frame];
             if rest > 1e-6 {
-                let reference = bind[frame].unwrap_or_else(|| quaternion_of(matrix));
-                for (sum, value) in rotation.iter_mut().zip(reference) {
+                for (sum, value) in rotation.iter_mut().zip(bind[frame]) {
                     *sum += value * rest;
                 }
             }
@@ -343,6 +374,26 @@ pub fn blend_pose(
             let rest = 1.0 - moved[frame];
             for (value, sum) in matrix[9..].iter_mut().zip(translations[frame]) {
                 *value = sum + *value * rest.max(0.0);
+            }
+        }
+    }
+    for layer in layers.iter().filter(|l| l.upper_body && l.weight > 0.0) {
+        let weight = layer.weight.min(1.0);
+        let seconds = layer_seconds(layer);
+        for track in &layer.clip.tracks {
+            if !is_upper_body(track.bone_id) || track.keys.is_empty() {
+                continue;
+            }
+            let Some(frame) = frame_of(model, track.bone_id) else {
+                continue;
+            };
+            let key = track.sample(seconds);
+            let matrix = &mut pose[frame];
+            write_rotation(matrix, nlerp(quaternion_of(matrix), key.rotation, weight));
+            if let Some(position) = key.translation {
+                for (value, target) in matrix[9..].iter_mut().zip(position) {
+                    *value += (target - *value) * weight;
+                }
             }
         }
     }
@@ -371,6 +422,7 @@ impl Clip {
                 seconds,
                 weight: 1.0,
                 looped: true,
+                upper_body: false,
             }],
             in_place,
         )
@@ -555,6 +607,7 @@ mod tests {
             seconds: 0.0,
             weight,
             looped: true,
+            upper_body: false,
         };
         let pose = blend_pose(&model, &[layer(&a, 1.0), layer(&b, 1.0)], false).unwrap();
         let q = quaternion_of(&pose[0]);
@@ -586,9 +639,39 @@ mod tests {
             seconds: 5.0,
             weight: 1.0,
             looped: false,
+            upper_body: false,
         };
         let pose = blend_pose(&model, &[layer], false).unwrap();
         assert_eq!(&pose[0][9..], &[1.0, 0.0, 0.25]);
         assert!(package.clip("WALK").is_some());
+    }
+    #[test]
+    fn upper_body_overlays_leave_the_legs_alone() {
+        let mut model = one_bone([0.0, 0.0, 0.0, 1.0]);
+        let mut leg = model.frames[0].clone();
+        leg.bone_id = Some(41);
+        model.frames.push(leg);
+        let s = (std::f32::consts::FRAC_PI_4).sin();
+        let mut fire = still([0.0, 0.0, s, s], None);
+        fire.tracks[0].bone_id = 22;
+        let mut kick = fire.tracks[0].clone();
+        kick.bone_id = 41;
+        fire.tracks.push(kick);
+        model.frames[0].bone_id = Some(22);
+        let pose = blend_pose(
+            &model,
+            &[Layer {
+                clip: &fire,
+                seconds: 0.0,
+                weight: 1.0,
+                looped: false,
+                upper_body: true,
+            }],
+            false,
+        )
+        .unwrap();
+        let arm = quaternion_of(&pose[0]);
+        assert!((arm[2] - s).abs() < 1e-4, "arm follows the overlay");
+        assert_eq!(pose[1], model.bind_pose()[1], "leg keeps the base pose");
     }
 }

@@ -411,7 +411,7 @@ impl State {
         Pose {
             position: feet.to_array(),
             yaw: if self.walking { self.ped_yaw } else { self.yaw },
-            moving: self.walking && self.ped_clip != "idle_stance",
+            moving: self.walking && self.ped_animator.clip() != "idle_stance",
             interior: self.interior,
             car_model: self.active_car as u16,
             ped_model: self.active_ped as u16,

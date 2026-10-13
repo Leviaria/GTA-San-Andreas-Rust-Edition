@@ -129,6 +129,21 @@ pub fn pellet_directions(aim: Vec3, pellets: u32) -> Vec<Vec3> {
         .collect()
 }
 
+/// A gun's fire and reload clips, from its animation group in anim.img.
+pub struct WeaponAnims {
+    pub package: std::sync::Arc<sa_assets::ifp::Package>,
+    pub fire: Option<String>,
+    pub reload: Option<String>,
+}
+
+/// Fist punches in ped.ifp, thrown in turn.
+const PUNCHES: [&str; 3] = ["fighta_1", "fighta_2", "fighta_3"];
+/// Seconds between punches.
+const PUNCH_INTERVAL: f32 = 0.45;
+/// How far a punch reaches and what it takes off a pedestrian.
+const PUNCH_REACH: f32 = 1.4;
+const PUNCH_DAMAGE: f32 = 10.0;
+
 /// HAnim id of the right hand in San Andreas peds.
 const RIGHT_HAND: i32 = 24;
 
@@ -146,6 +161,39 @@ impl State {
             if let Err(error) = audio.play_spatial(sound, at.to_array()) {
                 eprintln!("Weapon sound unavailable: {error:#}");
             }
+        }
+    }
+
+    /// The held gun's animation group, loaded once from anim.img and made
+    /// playable on the player's ped.
+    fn held_weapon_anims(&mut self) -> Option<&WeaponAnims> {
+        let group = self.arsenal.held()?.weapon.group.clone();
+        if !self.weapon_anims.contains_key(&group) {
+            let loaded = sa_scene::weapon_list::weapon_clips(&self.resource_game_dir, &group)
+                .map_err(|e| eprintln!("Weapon animations {group} unavailable: {e:#}"))
+                .ok()
+                .map(|package| {
+                    let (fire, reload) = sa_scene::weapon_list::fire_and_reload(&package, &group);
+                    WeaponAnims {
+                        package: std::sync::Arc::new(package),
+                        fire,
+                        reload,
+                    }
+                });
+            self.weapon_anims.insert(group.clone(), loaded);
+        }
+        let anims = self.weapon_anims.get(&group)?.as_ref()?;
+        if let Some((ped, _)) = &mut self.ped {
+            ped.share_clips(&anims.package);
+        }
+        Some(anims)
+    }
+
+    /// Plays an upper-body clip on the player, such as a shot or a reload.
+    fn overlay_player(&mut self, names: &[&str]) {
+        if let Some((ped, _)) = &self.ped {
+            self.ped_animator
+                .overlay(names, |name| ped.clip_duration(name));
         }
     }
 
@@ -226,8 +274,24 @@ impl State {
             .player
             .as_ref()
             .map_or(self.position, |player| player.feet + Vec3::Y * 1.4);
+        let anims = self
+            .held_weapon_anims()
+            .map(|a| (a.fire.clone(), a.reload.clone()));
         if !was_reloading && self.arsenal.reloading() {
             self.play_weapon_sound(None, muzzle_at);
+            if let Some((_, Some(reload))) = &anims {
+                self.overlay_player(&[reload]);
+            }
+        }
+        if shot == Shot::Fired {
+            match &anims {
+                Some((Some(fire), _)) => self.overlay_player(&[fire, "shot_partial"]),
+                _ => self.overlay_player(&["shot_partial"]),
+            }
+        }
+        self.punch_cooldown = (self.punch_cooldown - dt).max(0.0);
+        if trigger && self.arsenal.current.is_none() && self.punch_cooldown <= 0.0 {
+            self.punch(muzzle_at);
         }
         self.menu.weapon_hud = on_foot.then(|| match self.arsenal.held() {
             Some(held) => (
@@ -274,6 +338,31 @@ impl State {
             if let Some((index, _)) = self.crowd.first_hit(origin, direction, reach) {
                 self.crowd.damage(index, damage);
             }
+        }
+    }
+}
+
+impl State {
+    /// A fist punch: CJ swings, and the nearest pedestrian just in front
+    /// takes a hit.
+    fn punch(&mut self, chest: Vec3) {
+        self.punch_cooldown = PUNCH_INTERVAL;
+        let name = PUNCHES[self.punches % PUNCHES.len()];
+        self.punches += 1;
+        self.overlay_player(&[name, "fighta_1"]);
+        let facing = Vec3::new(self.ped_yaw.sin(), 0.0, self.ped_yaw.cos());
+        let target = self
+            .crowd
+            .walkers
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.dead_for.is_none())
+            .map(|(i, w)| (i, w.feet + Vec3::Y * 1.2 - chest))
+            .filter(|(_, to)| to.length() < PUNCH_REACH && to.normalize_or_zero().dot(facing) > 0.5)
+            .min_by(|a, b| a.1.length().total_cmp(&b.1.length()))
+            .map(|(i, _)| i);
+        if let Some(index) = target {
+            self.crowd.damage(index, PUNCH_DAMAGE);
         }
     }
 }

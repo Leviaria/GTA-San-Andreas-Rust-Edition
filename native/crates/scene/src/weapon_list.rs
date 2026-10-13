@@ -61,6 +61,39 @@ impl Weapon {
     }
 }
 
+/// A weapon animation group's clips, such as `colt45.ifp`, from the
+/// player's own `anim/anim.img`.
+pub fn weapon_clips(game: &Path, group: &str) -> anyhow::Result<sa_assets::ifp::Package> {
+    anyhow::ensure!(
+        !group.is_empty() && group.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "invalid animation group"
+    );
+    let mut archive = sa_assets::Img::open(&sa_assets::game_path::resolve(game, "anim/anim.img")?)?;
+    sa_assets::ifp::decode(&archive.read(&format!("{group}.ifp"))?)
+}
+
+/// The standing fire and reload clips in a weapon group's package, by
+/// name: `<group>_fire` when it exists, otherwise any non-crouching clip
+/// with "fire" in its name; a reload is "reload" or a name ending "_load".
+pub fn fire_and_reload(
+    package: &sa_assets::ifp::Package,
+    group: &str,
+) -> (Option<String>, Option<String>) {
+    let standing = |name: &&String| !name.contains("crouch");
+    let names: Vec<&String> = package.clips.iter().map(|c| &c.name).collect();
+    let exact = format!("{group}_fire");
+    let fire = names
+        .iter()
+        .find(|n| ***n == exact)
+        .or_else(|| names.iter().find(|n| standing(n) && n.contains("fire")))
+        .map(|n| (*n).clone());
+    let reload = names
+        .iter()
+        .find(|n| standing(n) && (n.contains("reload") || n.ends_with("_load")))
+        .map(|n| (*n).clone());
+    (fire, reload)
+}
+
 pub fn original_guns(game: &Path) -> Vec<Weapon> {
     sa_assets::game_path::resolve(game, "data/weapon.dat")
         .ok()
@@ -183,5 +216,41 @@ mod tests {
     #[test]
     fn missing_file_gives_no_guns() {
         assert!(original_guns(Path::new("/definitely/not/a/game")).is_empty());
+    }
+
+    #[test]
+    fn standing_fire_and_reload_clips_are_found_by_name() {
+        let package = |names: &[&str]| sa_assets::ifp::Package {
+            name: "test".into(),
+            clips: names
+                .iter()
+                .map(|n| sa_assets::ifp::Clip {
+                    name: (*n).into(),
+                    duration: 1.0,
+                    tracks: vec![],
+                })
+                .collect(),
+        };
+        let colt = package(&[
+            "colt45_crouchfire",
+            "colt45_fire_2hands",
+            "colt45_fire",
+            "colt45_reload",
+        ]);
+        assert_eq!(
+            fire_and_reload(&colt, "colt45"),
+            (Some("colt45_fire".into()), Some("colt45_reload".into()))
+        );
+        let rifle = package(&[
+            "rifle_crouchfire",
+            "rifle_crouchload",
+            "rifle_fire_poor",
+            "rifle_load",
+        ]);
+        assert_eq!(
+            fire_and_reload(&rifle, "rifle"),
+            (Some("rifle_fire_poor".into()), Some("rifle_load".into()))
+        );
+        assert_eq!(fire_and_reload(&package(&[]), "uzi"), (None, None));
     }
 }
