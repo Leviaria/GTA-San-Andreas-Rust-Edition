@@ -233,14 +233,24 @@ impl State {
         if !was_reloading && self.arsenal.reloading() {
             self.play_weapon_sound(None, muzzle_at);
         }
-        self.menu.weapon_hud = self.arsenal.held().filter(|_| on_foot).map(|held| {
-            (
+        self.menu.weapon_hud = on_foot.then(|| match self.arsenal.held() {
+            Some(held) => (
                 held.weapon.label(),
                 held.loaded,
                 held.spare,
-                self.aim_held,
+                true,
                 self.arsenal.reloading(),
-            )
+            ),
+            // Say how to get a gun, or why there is none, instead of
+            // showing nothing at all.
+            None if self.arsenal.guns.is_empty() => (
+                "No guns: weapon.dat not found".to_owned(),
+                0,
+                0,
+                false,
+                false,
+            ),
+            None => ("Fists".to_owned(), 0, 0, false, false),
         });
         if shot != Shot::Fired {
             return;
