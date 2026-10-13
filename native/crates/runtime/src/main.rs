@@ -6,6 +6,7 @@ use sa_scene::{
 };
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
 mod capture;
+mod car_contacts;
 mod chat;
 mod client_scripts;
 mod controller;
@@ -27,6 +28,7 @@ mod server_events;
 mod session_resources;
 mod settings;
 mod shadow;
+mod shared_traffic;
 mod skids;
 mod streaming;
 mod traffic;
@@ -249,6 +251,7 @@ struct State {
     ped_paths: Option<sa_scene::roads::RoadGraph>,
     ped_paths_tried: bool,
     traffic_meshes: Vec<traffic::TrafficMesh>,
+    remote_traffic: Vec<shared_traffic::RemoteTraffic>,
     /// Catalog indices traffic may use, and the catalog size they were built for.
     traffic_models: Vec<usize>,
     traffic_models_for: usize,
@@ -349,6 +352,13 @@ impl State {
             .flat_map(|b| &b.vertices)
             .map(|v| v.position[1])
             .fold(f32::INFINITY, f32::min);
+        let size = sa_scene::vehicle::measure(
+            scene
+                .batches
+                .iter()
+                .flat_map(|b| &b.vertices)
+                .map(|v| v.position),
+        );
         let batches = Self::upload_scene(
             &self.device,
             &self.queue,
@@ -358,7 +368,9 @@ impl State {
             scene,
         )?;
         Ok((
-            sa_scene::vehicle::Car::new(Vec3::ZERO, clearance).with_handling(handling),
+            sa_scene::vehicle::Car::new(Vec3::ZERO, clearance)
+                .with_handling(handling)
+                .with_size(size),
             batches,
         ))
     }
@@ -383,7 +395,7 @@ impl State {
             if let Some(placed) =
                 sa_scene::vehicle::Car::spawn_near(world, origin, self.yaw, car.clearance)
             {
-                *car = placed.with_handling(car.handling);
+                *car = placed.with_handling(car.handling).with_size(car.size);
                 self.car_render_pose = None;
                 self.driving = true;
                 self.network_car_spawned = true;
@@ -945,6 +957,7 @@ impl State {
             ped_paths: None,
             ped_paths_tried: false,
             traffic_meshes: Vec::new(),
+            remote_traffic: Vec::new(),
             traffic_models: Vec::new(),
             traffic_models_for: usize::MAX,
             network_revision: 0,
@@ -1451,6 +1464,7 @@ impl State {
         } else {
             self.position += motion.normalize_or_zero() * dt * speed;
         }
+        self.resolve_vehicle_contacts();
         if self.walking && !self.driving && self.third_person {
             if let (Some((ped, batches)), Some(player)) = (&self.ped, &self.player) {
                 if dt > 0.0 {
@@ -1583,6 +1597,7 @@ impl State {
         }
         self.update_network();
         self.update_traffic(dt);
+        self.update_shared_traffic(dt);
         self.update_crowd(dt);
         self.update_weapons(dt);
         let camera_time = self.animation.as_ref().and_then(|cut| {
@@ -1760,6 +1775,7 @@ impl State {
             .chain(self.car.iter().flat_map(|(_, b)| b))
             .chain(self.spawned_peds.iter().flat_map(|p| &p.batches))
             .chain(self.traffic_meshes.iter().flat_map(|m| &m.batches))
+            .chain(self.remote_traffic.iter().flat_map(|c| &c.batches))
             .chain(self.crowd_meshes.iter().flat_map(|m| &m.batches))
             .chain(
                 self.remote_actors
@@ -1835,7 +1851,7 @@ impl State {
         else {
             return false;
         };
-        *car = placed.with_handling(car.handling);
+        *car = placed.with_handling(car.handling).with_size(car.size);
         self.car_render_pose = None;
         true
     }
@@ -1989,7 +2005,7 @@ impl State {
                     let placed = selected.and_then(|(c, _)| {
                         self.collision.as_ref().and_then(|world| {
                             sa_scene::vehicle::Car::spawn_near(world, origin, self.yaw, c.clearance)
-                                .map(|car| car.with_handling(c.handling))
+                                .map(|car| car.with_handling(c.handling).with_size(c.size))
                         })
                     });
                     let Some(placed) = placed else {

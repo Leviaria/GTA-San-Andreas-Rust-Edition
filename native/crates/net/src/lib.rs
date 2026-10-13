@@ -100,6 +100,56 @@ impl Pose {
                 .is_none_or(|request| request.sequence != 0)
     }
 }
+/// Traffic cars one player's game may share at once.
+pub const MAX_TRAFFIC: usize = 32;
+/// Players this far apart do not receive each other's traffic.
+const TRAFFIC_RANGE: f32 = 400.0;
+/// Traffic not refreshed for this long is gone (its owner left or moved away).
+const TRAFFIC_STALE: Duration = Duration::from_millis(800);
+/// One ambient traffic car a player's game drives, as the other players see
+/// it. Compact on the wire: centimetres, milliradians, decimetres a second.
+/// Each game settles the car on its own road surface, so no height detail
+/// is needed beyond the rough position.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrafficPose {
+    /// Stable while the car exists in its owner's game.
+    pub id: u32,
+    /// Index in the session's car catalog.
+    pub model: u16,
+    pub position: [i32; 3],
+    pub yaw: i16,
+    pub speed: i16,
+}
+impl TrafficPose {
+    pub fn new(id: u32, model: u16, position: [f32; 3], yaw: f32, speed: f32) -> Self {
+        let yaw = yaw.sin().atan2(yaw.cos());
+        Self {
+            id,
+            model,
+            position: position.map(|v| (v.clamp(-20000.0, 20000.0) * 100.0).round() as i32),
+            yaw: (yaw * 1000.0).round() as i16,
+            speed: (speed.clamp(-200.0, 200.0) * 10.0).round() as i16,
+        }
+    }
+    pub fn position(&self) -> [f32; 3] {
+        self.position.map(|v| v as f32 / 100.0)
+    }
+    pub fn yaw(&self) -> f32 {
+        f32::from(self.yaw) / 1000.0
+    }
+    pub fn speed(&self) -> f32 {
+        f32::from(self.speed) / 10.0
+    }
+    fn valid(&self) -> bool {
+        self.model < 256
+            && self.position.iter().all(|v| v.abs() <= 2_000_000)
+            && self.yaw.abs() <= 3150
+            && self.speed.abs() <= 2000
+    }
+}
+fn valid_traffic(cars: &[TrafficPose]) -> bool {
+    cars.len() <= MAX_TRAFFIC && cars.iter().all(TrafficPose::valid)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Peer {
     pub id: u32,
@@ -190,6 +240,10 @@ enum Message {
         /// Client nonce for the identity check; absent before protocol 8.1.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nonce: Option<String>,
+        /// The game shares traffic. Older games leave it out and never
+        /// receive traffic messages.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        traffic: bool,
     },
     Welcome {
         id: u32,
@@ -199,6 +253,9 @@ enum Message {
         salt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         challenge: Option<Challenge>,
+        /// The host relays traffic; games only send theirs when it does.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        traffic: bool,
     },
     /// Older games: an unsigned identity hash. Ignored.
     Identity(String),
@@ -233,6 +290,13 @@ enum Message {
     /// `ResourceChunk`s. Only clients told a hash by a script event ask.
     ScriptFile {
         sha256: String,
+    },
+    /// Client -> host: the traffic this game drives right now.
+    Traffic(Vec<TrafficPose>),
+    /// Host -> client: another player's traffic near this one.
+    TrafficOf {
+        owner: u32,
+        cars: Vec<TrafficPose>,
     },
 }
 fn safe_name(name: &str) -> String {
@@ -390,6 +454,9 @@ struct Mailbox {
     server_key: Mutex<Option<Arc<identity::ServerKey>>>,
     identity_salt: Mutex<String>,
     identities: Mutex<HashMap<u32, PlayerIdentity>>,
+    /// This game's own traffic, and other players' traffic by owner.
+    traffic_out: Mutex<Vec<TrafficPose>>,
+    traffic_in: Mutex<HashMap<u32, (Instant, Vec<TrafficPose>)>>,
 }
 impl Mailbox {
     fn receive(&self, event: NetEvent) {
@@ -518,6 +585,20 @@ impl Session {
     #[allow(clippy::type_complexity)]
     fn shared(&self) -> (Arc<AtomicBool>, Arc<Mutex<Pose>>, Arc<Mutex<Report>>) {
         (self.stop.clone(), self.local.clone(), self.report.clone())
+    }
+    /// Share the traffic this game drives with nearby players.
+    pub fn set_traffic(&self, mut cars: Vec<TrafficPose>) {
+        cars.truncate(MAX_TRAFFIC);
+        *self.mail.traffic_out.lock().unwrap() = cars;
+    }
+    /// Other players' traffic near this player, by owner.
+    pub fn traffic(&self) -> Vec<(u32, Vec<TrafficPose>)> {
+        let mut incoming = self.mail.traffic_in.lock().unwrap();
+        incoming.retain(|_, (at, _)| at.elapsed() < TRAFFIC_STALE);
+        incoming
+            .iter()
+            .map(|(owner, (_, cars))| (*owner, cars.clone()))
+            .collect()
     }
     /// Latest-only mailbox: a slow renderer cannot grow a network queue.
     /// Queue a script event. Hosts send to one player (`Some(id)`) or all
@@ -655,6 +736,9 @@ struct Guest {
     /// (client nonce, server nonce) while the identity check is open.
     challenge: Option<(String, String)>,
     identity: Option<PlayerIdentity>,
+    /// Shares traffic, and the traffic it last sent.
+    traffic_ok: bool,
+    traffic: Vec<TrafficPose>,
 }
 #[allow(clippy::too_many_arguments)]
 fn host_worker(
@@ -672,6 +756,7 @@ fn host_worker(
         .fingerprint()
         .expect("validated host inventory");
     let mut guests: Vec<Guest> = Vec::new();
+    let mut traffic_tick = false;
     let mut seats = passengers::SeatBook::default();
     let mut next_id = 1_u32;
     let mut next_tick = Instant::now();
@@ -704,6 +789,8 @@ fn host_worker(
                 budget: (Instant::now(), 0),
                 challenge: None,
                 identity: None,
+                traffic_ok: false,
+                traffic: Vec::new(),
             });
             next_id = next_id.wrapping_add(1).max(1);
         }
@@ -742,7 +829,7 @@ fn host_worker(
                         let Some(data) = share.blob(&sha256) else { return false; };
                         guest.transfer = Some((sha256, data, 0));
                     }
-                    Message::Hello { version, name, resources, nonce } if !guest.hello && !guest.assets => {
+                    Message::Hello { version, name, resources, nonce, traffic } if !guest.hello && !guest.assets => {
                         if resources.as_ref().is_some_and(|value| value != &fingerprint)
                             || (!share.manifest.resources.is_empty() && resources.as_ref() != Some(&fingerprint)) {
                             let _ = guest.wire.queue(&Message::Reject("Server resource versions do not match. Prepare server mods before joining.".into()));
@@ -767,6 +854,7 @@ fn host_worker(
                         admitted += 1;
                         guest.peer.name = safe_name(&name);
                         guest.hello = true;
+                        guest.traffic_ok = traffic;
                         let key = mail.server_key.lock().unwrap().clone();
                         let challenge = match (key, nonce) {
                             (Some(key), Some(client)) if identity::valid_hex32(&client) => {
@@ -790,6 +878,7 @@ fn host_worker(
                                 id: guest.peer.id,
                                 salt: String::new(),
                                 challenge,
+                                traffic: true,
                             })
                             .is_err()
                         {
@@ -814,6 +903,9 @@ fn host_worker(
                     }
                     Message::Ping(nonce) if guest.hello => {
                         if guest.wire.queue(&Message::Pong(nonce)).is_err(){return false;}
+                    }
+                    Message::Traffic(cars) if guest.hello && guest.traffic_ok && valid_traffic(&cars) => {
+                        guest.traffic = cars;
                     }
                     Message::Pose(pose) if guest.hello && pose.valid() => {
                         guest.peer.pose = seats.apply(guest.peer.id, pose, &source);
@@ -909,10 +1001,50 @@ fn host_worker(
             guests.retain_mut(|guest| {
                 !guest.ready || (guest.wire.queue(&snapshot).is_ok() && guest.wire.flush().is_ok())
             });
+            traffic_tick = !traffic_tick;
+            if traffic_tick {
+                relay_traffic(&mut guests, host_player, &local, &mail);
+            }
         }
         thread::sleep(Duration::from_millis(5));
     }
     publish(&report, "Disconnected", false, 0, Vec::new());
+}
+/// Pass every player's traffic to the nearby players, at half the pose rate.
+fn relay_traffic(guests: &mut [Guest], host_player: bool, local: &Mutex<Pose>, mail: &Mailbox) {
+    let near = |a: [f32; 3], b: [f32; 3]| {
+        let (dx, dz) = (a[0] - b[0], a[2] - b[2]);
+        dx * dx + dz * dz <= TRAFFIC_RANGE * TRAFFIC_RANGE
+    };
+    let host_pose = host_player.then(|| local.lock().unwrap().position);
+    let mut owners: Vec<(u32, [f32; 3], Vec<TrafficPose>)> = guests
+        .iter()
+        .filter(|g| g.ready && !g.traffic.is_empty())
+        .map(|g| (g.peer.id, g.peer.pose.position, g.traffic.clone()))
+        .collect();
+    if let Some(at) = host_pose {
+        let cars = mail.traffic_out.lock().unwrap().clone();
+        if !cars.is_empty() {
+            owners.push((0, at, cars));
+        }
+    }
+    for (owner, at, cars) in owners {
+        if let Some(host) = host_pose.filter(|_| owner != 0) {
+            if near(at, host) {
+                mail.traffic_in
+                    .lock()
+                    .unwrap()
+                    .insert(owner, (Instant::now(), cars.clone()));
+            }
+        }
+        let message = Message::TrafficOf { owner, cars };
+        for guest in guests.iter_mut().filter(|g| {
+            g.ready && g.traffic_ok && g.peer.id != owner && near(at, g.peer.pose.position)
+        }) {
+            // A full queue drops this update; the next one follows shortly.
+            let _ = guest.wire.queue(&message);
+        }
+    }
 }
 #[allow(clippy::too_many_arguments)]
 fn client_stream(
@@ -933,8 +1065,11 @@ fn client_stream(
         name,
         resources: fingerprint,
         nonce: client_nonce.clone(),
+        traffic: true,
     })?;
     let mut id = None;
+    let mut host_traffic = false;
+    let mut traffic_tick = false;
     let mut next_tick = Instant::now();
     let mut next_ping = Instant::now();
     let mut ping: Option<(u64, Instant)> = None;
@@ -951,9 +1086,11 @@ fn client_stream(
                 Message::Welcome {
                     id: assigned,
                     challenge,
+                    traffic,
                     ..
                 } if id.is_none() && assigned != 0 => {
                     id = Some(assigned);
+                    host_traffic = traffic;
                     if let (Some(secret), Some(client), Some(challenge)) =
                         (IDENTITY_SECRET.get(), &client_nonce, challenge)
                     {
@@ -1007,6 +1144,15 @@ fn client_stream(
                         local_id,
                         peers,
                     );
+                }
+                Message::TrafficOf { owner, cars } if id.is_some() && host_traffic => {
+                    if !valid_traffic(&cars) || Some(owner) == id {
+                        return Err(invalid());
+                    }
+                    mail.traffic_in
+                        .lock()
+                        .unwrap()
+                        .insert(owner, (Instant::now(), cars));
                 }
                 Message::Pong(reply) if id.is_some() => {
                     if let Some((expected, sent)) = ping {
@@ -1078,6 +1224,11 @@ fn client_stream(
         if id.is_some() && Instant::now() >= next_tick {
             next_tick = Instant::now() + TICK;
             wire.queue(&Message::Pose(*local.lock().unwrap()))?;
+            traffic_tick = !traffic_tick;
+            if host_traffic && traffic_tick {
+                let cars = mail.traffic_out.lock().unwrap().clone();
+                wire.queue(&Message::Traffic(cars))?;
+            }
         }
         if id.is_some() && ping.is_none() && Instant::now() >= next_ping {
             nonce = nonce.wrapping_add(1);
@@ -1094,6 +1245,76 @@ fn client_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn traffic_reaches_nearby_players_and_skips_older_games() {
+        let host = Session::host(address(), "Host").unwrap();
+        let a = Session::join(host.address, "A").unwrap();
+        let b = Session::join(host.address, "B").unwrap();
+        // An older game that never announced traffic support.
+        let (mut old, _, _) = handshake(&host, None);
+        old.queue(&Message::Pose(Pose::default())).unwrap();
+        old.flush().unwrap();
+        let car = TrafficPose::new(7, 12, [10.0, 2.5, -40.25], 3.0, 13.4);
+        assert_eq!(car.position(), [10.0, 2.5, -40.25]);
+        assert!((car.yaw() - 3.0).abs() < 0.001 && (car.speed() - 13.4).abs() < 0.01);
+        a.set_traffic(vec![car]);
+        host.set_traffic(vec![TrafficPose::new(1, 3, [0.0; 3], 0.0, 0.0)]);
+        let far = Pose {
+            position: [5000.0, 0.0, 5000.0],
+            ..Pose::default()
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (mut b_saw_a, mut b_saw_host, mut host_saw_a, mut a_saw_host) =
+            (false, false, false, false);
+        while !(b_saw_a && b_saw_host && host_saw_a && a_saw_host) {
+            assert!(Instant::now() < deadline, "traffic never arrived");
+            for session in [&host, &a, &b] {
+                session.update(Pose::default());
+            }
+            let ids = |s: &Session| {
+                s.traffic()
+                    .into_iter()
+                    .map(|(owner, cars)| (owner, cars.len()))
+                    .collect::<Vec<_>>()
+            };
+            let (seen_b, seen_host, seen_a) = (ids(&b), ids(&host), ids(&a));
+            let a_id = a.report.lock().unwrap().local_id;
+            b_saw_a |= seen_b.contains(&(a_id, 1));
+            b_saw_host |= seen_b.contains(&(0, 1));
+            host_saw_a |= seen_host.contains(&(a_id, 1));
+            a_saw_host |= seen_a.contains(&(0, 1));
+            assert!(
+                seen_a.iter().all(|(owner, _)| *owner != a_id),
+                "own traffic echoed"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(b.traffic().iter().find(|(o, _)| *o != 0).unwrap().1[0], car);
+        // The older game got no traffic messages and is still connected.
+        let mut messages = Vec::new();
+        let until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < until {
+            old.queue(&Message::Pose(Pose::default())).unwrap();
+            old.flush().unwrap();
+            messages.extend(old.read().unwrap());
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(messages
+            .iter()
+            .all(|m| !matches!(m, Message::TrafficOf { .. })));
+        // A player far away stops receiving it.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            assert!(Instant::now() < deadline, "far player kept traffic");
+            host.update(Pose::default());
+            a.update(Pose::default());
+            b.update(far);
+            if b.traffic().is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
     #[test]
     fn gameplay_round_trip_is_measured_on_the_active_connection() {
         let host = Session::host(address(), "Host").unwrap();
@@ -1177,6 +1398,7 @@ mod tests {
             name: "Raw".into(),
             resources: None,
             nonce,
+            traffic: false,
         })
         .unwrap();
         wire.flush().unwrap();
@@ -1312,6 +1534,7 @@ mod tests {
             id: 7,
             salt: String::new(),
             challenge: None,
+            traffic: false,
         })
         .unwrap();
         let mut frame = (data.len() as u32).to_le_bytes().to_vec();
@@ -1603,6 +1826,7 @@ mod tests {
                 name: "Bad".into(),
                 resources: None,
                 nonce: None,
+                traffic: false,
             })
             .unwrap();
         intruder.flush().unwrap();

@@ -128,6 +128,8 @@ pub(super) struct RemoteActor {
     pub ped: Vec<GpuBatch>,
     pub car: Vec<GpuBatch>,
     clearance: f32,
+    /// Body size of the car, for contacts with the local player.
+    pub car_size: [f32; 3],
     pub ped_model: usize,
     pub car_model: usize,
     model_changed: Instant,
@@ -442,6 +444,7 @@ impl State {
             ped: duplicate(&self.device, ped),
             car: duplicate(&self.device, car_batches),
             clearance: car.clearance,
+            car_size: car.size,
             ped_model: ped_index,
             car_model: car_index,
             model_changed: Instant::now(),
