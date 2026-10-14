@@ -2396,7 +2396,9 @@ impl State {
                     .as_ref()
                     .filter(|_| self.driving)
                     .map(|(car, _)| car.speed),
-                self.yaw,
+                // The maps take a compass heading (0 = north, clockwise);
+                // the camera yaw is 0 facing south and grows towards east.
+                std::f32::consts::PI - self.yaw,
                 &self.radar_tiles,
             );
             let scale = (ui.ctx().content_rect().height() / 900.0).clamp(0.65, 1.5);
