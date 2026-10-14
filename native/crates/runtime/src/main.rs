@@ -8,6 +8,7 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Instant};
 mod animation;
 mod capture;
 mod car_contacts;
+mod car_damage;
 mod chat;
 mod client_scripts;
 mod controller;
@@ -56,6 +57,8 @@ struct GpuBatch {
     animated: bool,
     uv_animation: Option<Arc<sa_assets::uvanim::UvAnimation>>,
     base: Vec<f32>,
+    /// The door, wheel or panel of a car this batch draws.
+    piece: Option<sa_scene::vehicle::RigPiece>,
 }
 const HEADLIGHT_VERTICES: usize = 18;
 /// A light pool on the road ahead of the car and two coronas at its nose,
@@ -115,6 +118,10 @@ fn door_side(car_yaw: f32, offset: Vec3) -> &'static str {
     } else {
         "rhs"
     }
+}
+/// The front door on a `door_side`: the driver's door on "lhs".
+fn door_index(side: &str) -> usize {
+    usize::from(side != "lhs")
 }
 /// Corona and light-pool batches, drawn by their own additive pipelines.
 fn is_glow(batch: &GpuBatch) -> bool {
@@ -262,6 +269,16 @@ struct State {
     punches: usize,
     /// Seconds left of the get-in animation before the player drives.
     entering_car: Option<f32>,
+    /// The player's car door swinging while CJ climbs in or out.
+    door_swing: Option<car_damage::DoorSwing>,
+    /// Explosions still flashing: where, and for how long so far.
+    blast_flashes: Vec<(Vec3, f32)>,
+    /// Clock for flickering flames.
+    wreck_fire_seconds: f32,
+    fire_glows: wgpu::Buffer,
+    fire_glow_count: u32,
+    /// The parts look the player's car was last drawn with.
+    car_render_look: sa_scene::vehicle::Look,
     /// Weapon model id to (model, txd), and the meshes of guns drawn so far.
     weapon_models: Option<std::collections::HashMap<i32, (String, String)>>,
     gun_meshes: std::collections::HashMap<i32, Option<Vec<GpuBatch>>>,
@@ -463,13 +480,19 @@ impl State {
                         let steps: Vec<&str> = steps.iter().map(String::as_str).collect();
                         self.ped_animator
                             .perform_chain(&steps, |name| ped.clip_duration(name));
+                        let length = |name: &str| ped.clip_duration(name).unwrap_or(0.8);
+                        self.door_swing = Some(car_damage::DoorSwing::leaving(
+                            door_index(side),
+                            length(steps[0]),
+                            length(steps[1]),
+                        ));
                     }
                     self.player = Some(player);
                     self.driving = false;
                     self.walking = true;
                 }
                 car.stop();
-            } else if self.position.distance(car.position) < 6.0 {
+            } else if self.position.distance(car.position) < 6.0 && !car.damage.wrecked {
                 // Turn to the car and climb in before driving off.
                 let feet = self.player.as_ref().map_or(self.position, |p| p.feet);
                 let to_car = car.position - feet;
@@ -494,6 +517,15 @@ impl State {
                     Some(length) => {
                         self.ped_yaw = to_car.x.atan2(to_car.z);
                         self.entering_car = Some(length.min(4.0));
+                        if let Some((ped, _)) = &self.ped {
+                            let clip = |name: &str| ped.clip_duration(name).unwrap_or(0.8);
+                            self.door_swing = Some(car_damage::DoorSwing::entering(
+                                door_index(side),
+                                clip(steps[0]),
+                                clip(steps[1]),
+                                clip(steps[2]),
+                            ));
+                        }
                     }
                     None => {
                         self.driving = true;
@@ -518,6 +550,7 @@ impl State {
             .cars
             .iter()
             .enumerate()
+            .filter(|(_, c)| !c.damage.wrecked && !c.damage.burning())
             .map(|(i, c)| (i, c.position.distance(feet)))
             .filter(|(_, d)| *d < 5.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -541,6 +574,8 @@ impl State {
         car.stop();
         car.position = stolen.position + Vec3::Y * car.clearance;
         car.yaw = stolen.yaw;
+        // Dents and lost health come along with the car.
+        car.damage = stolen.damage;
         self.car_render_pose = None;
         self.leave_passenger();
         self.driving = true;
@@ -786,6 +821,12 @@ impl State {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let fire_glows = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fire glows"),
+            size: (car_damage::FIRE_VERTICES * std::mem::size_of::<sa_scene::Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let light_pool = make_glow("vs_main", "fs_pool");
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("SA textures"),
@@ -1022,6 +1063,12 @@ impl State {
             punch_cooldown: 0.0,
             punches: 0,
             entering_car: None,
+            door_swing: None,
+            blast_flashes: Vec::new(),
+            wreck_fire_seconds: 0.0,
+            fire_glows,
+            fire_glow_count: 0,
+            car_render_look: Default::default(),
             weapon_models: None,
             gun_meshes: std::collections::HashMap::new(),
             gun_drawn: None,
@@ -1110,6 +1157,7 @@ impl State {
             images.insert(key, group);
         }
         let mut batches = Vec::new();
+        let pieces = scene.vehicle_pieces;
         for batch in scene.batches {
             let raw: &[f32] = bytemuck::cast_slice(&batch.vertices);
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1135,6 +1183,7 @@ impl State {
                 } else {
                     Vec::new()
                 },
+                piece: pieces.get(&batch.key).copied(),
             });
         }
         batches.sort_by_key(|b| b.alpha);
@@ -1637,7 +1686,8 @@ impl State {
                 }
             }
         }
-        if let Some((car, batches)) = &self.car {
+        let look = self.own_car_look();
+        if let (Some((car, batches)), Some(look)) = (&self.car, look) {
             let pose = sa_net::VehiclePose {
                 position: car.position.to_array(),
                 yaw: car.yaw,
@@ -1645,22 +1695,18 @@ impl State {
                 roll: car.roll,
                 ..sa_net::VehiclePose::default()
             };
-            if multiplayer::car_changed(self.car_render_pose, pose) {
+            if multiplayer::car_changed(self.car_render_pose, pose) || look != self.car_render_look
+            {
                 self.car_uploads += 1;
                 let rotation = sa_scene::vehicle::model_rotation(car.yaw, car.pitch, car.roll);
                 for batch in batches {
-                    let mut raw = batch.base.clone();
-                    for v in raw.as_chunks_mut::<9>().0.iter_mut() {
-                        let point = rotation * Vec3::new(v[0], v[1], v[2]) + car.position;
-                        v[0] = point.x;
-                        v[1] = point.y;
-                        v[2] = point.z;
-                    }
+                    let raw = car_damage::pose_car(batch, &look, rotation, car.position);
                     self.queue
                         .write_buffer(&batch.buffer, 0, bytemuck::cast_slice(&raw));
                     self.car_uploaded_bytes += (raw.len() * std::mem::size_of::<f32>()) as u64;
                 }
                 self.car_render_pose = Some(pose);
+                self.car_render_look = look;
             }
         }
         if self.streamer.is_some() {
@@ -1690,6 +1736,13 @@ impl State {
         self.update_shared_traffic(dt);
         self.update_crowd(dt);
         self.update_weapons(dt);
+        self.update_car_damage(dt);
+        let mut glows = [sa_scene::Vertex::default(); car_damage::FIRE_VERTICES];
+        self.fire_glow_count = self.fire_glows(&mut glows);
+        if self.fire_glow_count > 0 {
+            self.queue
+                .write_buffer(&self.fire_glows, 0, bytemuck::cast_slice(&glows));
+        }
         let camera_time = self.animation.as_ref().and_then(|cut| {
             let keys = cut.camera_keys.as_ref()?;
             let duration = keys.last().unwrap().seconds.max(0.01);
@@ -2026,6 +2079,7 @@ impl State {
                     animated: true,
                     uv_animation: None,
                     base: Vec::new(),
+                    piece: None,
                 }
             })
             .collect();
@@ -2467,7 +2521,8 @@ impl State {
                 }
             }
         }
-        if self.lighting.daylight < 1.0 || self.interior != 0 {
+        let night = self.lighting.daylight < 1.0 || self.interior != 0;
+        if night || self.fire_glow_count > 0 {
             // Reuses the scene depth from the world pass.
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("night glows"),
@@ -2494,7 +2549,8 @@ impl State {
             });
             pass.set_bind_group(0, &self.camera_group, &[]);
             pass.set_bind_group(2, &self.shadows.group, &[]);
-            if let Some((car, batches)) = self.car.as_ref().filter(|_| self.interior == 0) {
+            if let Some((car, batches)) = self.car.as_ref().filter(|_| night && self.interior == 0)
+            {
                 if let Some(texture) = batches.first().map(|b| &b.texture) {
                     self.queue.write_buffer(
                         &self.headlights,
@@ -2509,11 +2565,21 @@ impl State {
                     pass.draw(6..HEADLIGHT_VERTICES as u32, 0..1);
                 }
             }
-            for b in self
-                .batches
-                .iter()
-                .filter(|b| is_glow(b) && (!self.culling_enabled || self.frustum.visible(b.bounds)))
-            {
+            let any_texture = self
+                .car
+                .as_ref()
+                .and_then(|(_, batches)| batches.first())
+                .or(self.batches.first())
+                .map(|b| &b.texture);
+            if let Some(texture) = any_texture.filter(|_| self.fire_glow_count > 0) {
+                pass.set_bind_group(1, texture, &[]);
+                pass.set_vertex_buffer(0, self.fire_glows.slice(..));
+                pass.set_pipeline(&self.corona);
+                pass.draw(0..self.fire_glow_count, 0..1);
+            }
+            for b in self.batches.iter().filter(|b| {
+                night && is_glow(b) && (!self.culling_enabled || self.frustum.visible(b.bounds))
+            }) {
                 pass.set_pipeline(if b.texture_key == sa_scene::lights::CORONA_KEY {
                     &self.corona
                 } else {

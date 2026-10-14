@@ -64,6 +64,8 @@ pub struct Scene {
     pub triangles: usize,
     pub animation: Option<sa_script::CutAnimation>,
     pub collision: Option<collision::CollisionWorld>,
+    /// For a car: which moving part each batch draws, by batch key.
+    pub vehicle_pieces: HashMap<String, vehicle::RigPiece>,
 }
 
 pub struct RadarTile {
@@ -413,7 +415,7 @@ pub fn load_car_model(game: &Path, model: &str) -> Result<Scene> {
         "invalid vehicle model name"
     );
     let mut main = Img::open(&sa_assets::game_path::resolve(game, "models/gta3.img")?)?;
-    let geometry = sa_assets::decode_vehicle_dff(&main.read(&format!("{model}.dff"))?)?;
+    let geometry = sa_assets::decode_vehicle_pieces(&main.read(&format!("{model}.dff"))?)?;
     let taxi = main.read(&format!("{model}.txd"))?;
     let common = fs::read(sa_assets::game_path::resolve(
         game,
@@ -429,15 +431,33 @@ pub fn load_car_model(game: &Path, model: &str) -> Result<Scene> {
     Ok(scene)
 }
 fn car_scene(
-    geometry: &[Geometry],
+    geometry: &[sa_assets::VehiclePiece],
     colours: Option<[[u8; 3]; 2]>,
     mut texture: impl FnMut(&str) -> Result<Texture>,
 ) -> Result<Scene> {
     let local = placement(0, 0, [0.0; 3], [0.0, 0.0, 0.0, 1.0])?;
     let mut batches = HashMap::new();
     let mut triangles = 0;
+    let mut pieces = HashMap::new();
     // Separate opaque bodywork and glass even when they share a texture.
-    for (index, g) in geometry.iter().enumerate() {
+    // Every batch holds one piece, so doors and wheels can move on their own.
+    for (index, piece) in geometry.iter().enumerate() {
+        let g = &piece.geometry;
+        let pivot = glam::Vec3::from_array(place(piece.pivot, &local, [0.0; 2]));
+        let radius = g
+            .positions
+            .iter()
+            .map(|p| {
+                let offset = glam::Vec3::from_array(place(*p, &local, [0.0; 2])) - pivot;
+                offset.y.hypot(offset.z)
+            })
+            .fold(0.0, f32::max);
+        let rig = vehicle::RigPiece {
+            part: piece.part,
+            damaged: piece.damaged,
+            pivot,
+            radius,
+        };
         for material_index in 0..g.materials.len() {
             let mut part = g.clone();
             part.triangles
@@ -456,13 +476,12 @@ fn car_scene(
             if material.texture.is_none() {
                 material.texture = Some("runtime_white".into());
             }
-            triangles += add_model(
-                &mut batches,
-                &[part],
-                &local,
-                [0.0; 2],
-                &format!("car{index}_{material_index}"),
-            )?;
+            let txd = format!("car{index}_{material_index}");
+            triangles += add_model(&mut batches, &[part], &local, [0.0; 2], &txd)?;
+            let prefix = format!("{txd}:");
+            for key in batches.keys().filter(|key| key.starts_with(&prefix)) {
+                pieces.insert(key.clone(), rig);
+            }
         }
     }
     let mut textures = HashMap::new();
@@ -506,6 +525,7 @@ fn car_scene(
         triangles,
         animation: None,
         collision: None,
+        vehicle_pieces: pieces,
     })
 }
 fn visible_region(distance_squared: f32, is_lod: bool, radius: f32) -> bool {
@@ -947,6 +967,7 @@ impl WorldLoader {
             triangles,
             animation: None,
             collision,
+            vehicle_pieces: HashMap::new(),
         })
     }
 }
@@ -989,6 +1010,7 @@ pub fn load_first_model(game: &Path) -> Result<Scene> {
         triangles,
         animation: None,
         collision: None,
+        vehicle_pieces: HashMap::new(),
     })
 }
 /// A small held model such as a gun (`colt45`), centred on its own origin.
@@ -1039,6 +1061,7 @@ pub fn load_weapon_model(game: &Path, model: &str, txd: &str) -> Result<Scene> {
         triangles,
         animation: None,
         collision: None,
+        vehicle_pieces: HashMap::new(),
     })
 }
 pub fn load_cuttest(game: &Path) -> Result<Scene> {
@@ -1081,6 +1104,7 @@ pub fn load_cuttest(game: &Path) -> Result<Scene> {
         triangles,
         animation: Some(animation),
         collision: None,
+        vehicle_pieces: HashMap::new(),
     })
 }
 

@@ -335,8 +335,15 @@ impl State {
             let reach = self.collision.as_ref().map_or(range, |world| {
                 world.clip_camera(origin, end).distance(origin)
             });
-            if let Some((index, _)) = self.crowd.first_hit(origin, direction, reach) {
-                self.crowd.damage(index, damage);
+            // Whichever is nearer along the shot, a person or a car, is hit.
+            let person = self.crowd.first_hit(origin, direction, reach);
+            let car = self.first_car_hit(origin, direction, reach);
+            match (person, car) {
+                (Some((index, near)), car) if car.is_none_or(|(_, far)| near <= far) => {
+                    self.crowd.damage(index, damage);
+                }
+                (_, Some((which, _))) => self.hurt_car(which, damage),
+                _ => {}
             }
         }
     }

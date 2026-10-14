@@ -1,7 +1,8 @@
 //! Lightweight vehicle dynamics with tire slip and steering inertia.
 //! Position is the model origin; speed and slip are in metres per second.
 use crate::collision::CollisionWorld;
-use glam::{Quat, Vec3};
+use glam::{Affine3A, Quat, Vec3};
+pub use sa_assets::{Panel, VehiclePart};
 /// Render the original model's -Z front in the simulated +Z-forward body frame.
 pub fn model_rotation(yaw: f32, pitch: f32, roll: f32) -> Quat {
     // Simulation stores independent forward/side grade angles. Euler bank
@@ -10,6 +11,181 @@ pub fn model_rotation(yaw: f32, pitch: f32, roll: f32) -> Quat {
     Quat::from_rotation_y(yaw + std::f32::consts::PI)
         * Quat::from_rotation_x(pitch)
         * Quat::from_rotation_z(-bank)
+}
+/// How far a door swings open, in radians.
+pub const DOOR_SWING: f32 = 1.2;
+/// One drawable piece of a car model and how it moves. Positions are in
+/// the model space of `Car` meshes (-Z front, -X left).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigPiece {
+    pub part: VehiclePart,
+    /// The `_dam` look of a part, drawn instead of the intact one once the
+    /// part is dented.
+    pub damaged: bool,
+    /// Door hinge or wheel hub.
+    pub pivot: Vec3,
+    /// Tyre radius of a wheel, so it turns as fast as the car rolls.
+    pub radius: f32,
+}
+/// Bit of a part in `Look::dents`; zero for parts without a damaged look.
+pub fn dent_bit(part: VehiclePart) -> u16 {
+    match part {
+        VehiclePart::Panel(panel) => 1 << panel as u16,
+        VehiclePart::Door(door) => 1 << (7 + u16::from(door.min(3))),
+        _ => 0,
+    }
+}
+/// What one car's moving parts show this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Look {
+    /// Metres rolled, which turns the wheels.
+    pub travel: f32,
+    /// Front wheel angle in radians, the same sign as `Car` steering.
+    pub steer: f32,
+    /// How far each door is open, 0 shut to 1 wide: front left, front
+    /// right, rear left, rear right.
+    pub doors: [f32; 4],
+    /// Parts showing their damaged look, by `dent_bit`.
+    pub dents: u16,
+    /// Burnt out after an explosion.
+    pub burnt: bool,
+}
+impl RigPiece {
+    /// Model-space placement of this piece for `look`, or `None` while the
+    /// other variant of the part (intact or damaged) is shown instead.
+    pub fn transform(&self, look: &Look) -> Option<Affine3A> {
+        let bit = dent_bit(self.part);
+        if self.damaged != (look.dents & bit != 0) {
+            return None;
+        }
+        let turn = match self.part {
+            VehiclePart::Wheel { front, .. } => {
+                let steer = if front {
+                    Quat::from_rotation_y(look.steer)
+                } else {
+                    Quat::IDENTITY
+                };
+                // Models face -Z, so rolling forwards turns the top of the
+                // tyre towards -Z.
+                steer * Quat::from_rotation_x(-look.travel / self.radius.max(0.1))
+            }
+            VehiclePart::Door(door) => {
+                // Hinges are at the front edge; left doors swing out to -X.
+                let side = if door % 2 == 0 { -1.0 } else { 1.0 };
+                Quat::from_rotation_y(side * look.doors[usize::from(door.min(3))] * DOOR_SWING)
+            }
+            _ => return Some(Affine3A::IDENTITY),
+        };
+        Some(
+            Affine3A::from_rotation_translation(turn, self.pivot)
+                * Affine3A::from_translation(-self.pivot),
+        )
+    }
+}
+/// Health a car starts with, as in SA.
+pub const FULL_HEALTH: f32 = 1000.0;
+/// Below this the engine catches fire and the car burns until it blows up.
+pub const ON_FIRE: f32 = 250.0;
+/// Health lost per second while burning: a burning car explodes in about
+/// five seconds.
+const BURN_RATE: f32 = 50.0;
+/// Closing speed in m/s a crash needs before it hurts the car.
+const CRASH_THRESHOLD: f32 = 4.0;
+/// Health lost per m/s of closing speed above the threshold.
+const CRASH_DAMAGE: f32 = 10.0;
+/// Closing speed that dents the panels on the side that hit.
+const DENT_SPEED: f32 = 6.0;
+/// What has happened to a car's body.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Damage {
+    pub health: f32,
+    pub dents: u16,
+    /// Blown up: burnt black and undriveable.
+    pub wrecked: bool,
+}
+impl Default for Damage {
+    fn default() -> Self {
+        Self {
+            health: FULL_HEALTH,
+            dents: 0,
+            wrecked: false,
+        }
+    }
+}
+impl Damage {
+    pub fn burning(&self) -> bool {
+        !self.wrecked && self.health < ON_FIRE
+    }
+    /// A crash at `impact` m/s closing speed. `towards` points from the car
+    /// to what it hit, in model space (-Z front, -X left). Returns the
+    /// health lost.
+    pub fn crash(&mut self, impact: f32, towards: Vec3) -> f32 {
+        if self.wrecked || !impact.is_finite() {
+            return 0.0;
+        }
+        if impact >= DENT_SPEED {
+            let flat = Vec3::new(towards.x, 0.0, towards.z).normalize_or_zero();
+            let (front, left) = (-flat.z, -flat.x);
+            let mut parts = Vec::new();
+            if front > 0.5 {
+                parts.extend([Panel::BumperFront, Panel::Bonnet].map(VehiclePart::Panel));
+                if impact >= DENT_SPEED * 2.0 {
+                    parts.extend(
+                        [Panel::WingLeft, Panel::WingRight, Panel::Windscreen]
+                            .map(VehiclePart::Panel),
+                    );
+                }
+            } else if front < -0.5 {
+                parts.extend([Panel::BumperRear, Panel::Boot].map(VehiclePart::Panel));
+            }
+            if left > 0.5 {
+                parts.extend([
+                    VehiclePart::Door(0),
+                    VehiclePart::Door(2),
+                    VehiclePart::Panel(Panel::WingLeft),
+                ]);
+            } else if left < -0.5 {
+                parts.extend([
+                    VehiclePart::Door(1),
+                    VehiclePart::Door(3),
+                    VehiclePart::Panel(Panel::WingRight),
+                ]);
+            }
+            for part in parts {
+                self.dents |= dent_bit(part);
+            }
+        }
+        self.hurt((impact - CRASH_THRESHOLD).max(0.0) * CRASH_DAMAGE)
+    }
+    /// Bullets or a blast: health only. Returns the health lost.
+    pub fn hurt(&mut self, amount: f32) -> f32 {
+        if self.wrecked || !amount.is_finite() || amount <= 0.0 {
+            return 0.0;
+        }
+        let before = self.health;
+        self.health = (self.health - amount).max(0.0);
+        before - self.health
+    }
+    /// Burn down a car on fire. Returns true the moment it explodes.
+    pub fn update(&mut self, dt: f32) -> bool {
+        if self.wrecked {
+            return false;
+        }
+        if self.burning() {
+            self.health = (self.health - BURN_RATE * dt.max(0.0)).max(0.0);
+        }
+        if self.health <= 0.0 {
+            self.wrecked = true;
+            // Everything that can buckle has buckled.
+            self.dents = u16::MAX;
+            return true;
+        }
+        false
+    }
+}
+/// World direction `towards` turned into a car's model space.
+pub fn to_model(yaw: f32, towards: Vec3) -> Vec3 {
+    Quat::from_rotation_y(-(yaw + std::f32::consts::PI)) * towards
 }
 /// Native tuning values; omitted JSON fields retain the original prototype defaults.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -99,6 +275,9 @@ pub struct Car {
     /// Half width, half length and height of the body, for car-to-car and
     /// car-to-ped contacts.
     pub size: [f32; 3],
+    pub damage: Damage,
+    /// Metres rolled, for turning the wheels.
+    travel: f32,
     vertical_speed: f32,
     lateral_speed: f32,
     steering_angle: f32,
@@ -119,6 +298,8 @@ impl Car {
             pitch: 0.0,
             roll: 0.0,
             size: DEFAULT_SIZE,
+            damage: Damage::default(),
+            travel: 0.0,
             vertical_speed: 0.0,
             lateral_speed: 0.0,
             steering_angle: 0.0,
@@ -152,6 +333,7 @@ impl Car {
         let mut velocity = self.forward() * self.speed + side * self.lateral_speed;
         let closing = (velocity - obstacle_velocity).dot(normal);
         if closing < 0.0 {
+            self.damage.crash(-closing, to_model(self.yaw, -normal));
             velocity -= normal * closing * 1.3;
             // Glancing blows spin the body a little.
             self.yaw_rate += self.forward().cross(normal).y * closing * 0.15;
@@ -159,6 +341,21 @@ impl Car {
         }
         self.speed = velocity.dot(self.forward());
         self.lateral_speed = velocity.dot(side);
+    }
+    /// Wheels, steering and dents as they should be drawn; doors are up to
+    /// whoever opens them.
+    pub fn look(&self) -> Look {
+        Look {
+            travel: self.travel,
+            steer: self.steering_angle,
+            dents: self.damage.dents,
+            burnt: self.damage.wrecked,
+            ..Look::default()
+        }
+    }
+    /// An explosion under the car throws it up a little.
+    pub fn blast(&mut self) {
+        self.vertical_speed = self.vertical_speed.max(5.0);
     }
     /// World velocity of the body, ignoring vertical motion.
     pub fn velocity(&self) -> Vec3 {
@@ -263,6 +460,12 @@ impl Car {
         if dt == 0.0 {
             return;
         }
+        // A burnt-out wreck only rolls to a stop.
+        let (throttle, steer, handbrake) = if self.damage.wrecked {
+            (0.0, 0.0, true)
+        } else {
+            (throttle, steer, handbrake)
+        };
         // Fixed maximum integration interval keeps grip consistent across frame rates.
         let steps = (dt / (1.0 / 120.0)).ceil() as usize;
         for _ in 0..steps {
@@ -409,6 +612,9 @@ impl Car {
         self.roll +=
             ((slope_roll + lateral_acceleration * 0.016).clamp(-0.5, 0.5) - self.roll) * blend;
         let motion = (self.forward() * self.speed + side * self.lateral_speed) * dt;
+        if grounded {
+            self.travel += self.speed * dt;
+        }
         let before_motion = self.position;
         let steps = ((motion.length() / 0.15).ceil() as usize).clamp(1, 20);
         for _ in 0..steps {
@@ -428,6 +634,11 @@ impl Car {
                     self.vertical_speed = self.vertical_speed.max(0.0);
                     continue;
                 }
+                // Hit a wall or a building: the car takes the knock.
+                let impact =
+                    (self.speed * self.speed + self.lateral_speed * self.lateral_speed).sqrt();
+                self.damage
+                    .crash(impact, to_model(self.yaw, motion.normalize_or_zero()));
                 self.stop();
                 break;
             }
@@ -496,6 +707,134 @@ mod tests {
         car.speed = 10.0;
         car.collide(&world, Vec3::new(0.0, 0.0, -0.1), Vec3::new(0.0, 0.0, 10.0));
         assert!((car.speed - 10.0).abs() < 1e-4);
+    }
+    #[test]
+    fn crashes_dent_the_side_that_hit_and_cost_health() {
+        let mut damage = Damage::default();
+        assert_eq!(damage.crash(3.0, Vec3::NEG_Z), 0.0, "a bump does nothing");
+        assert_eq!(damage.dents, 0);
+        // Nose first into a wall at 72 km/h.
+        let lost = damage.crash(20.0, Vec3::NEG_Z);
+        assert_eq!(lost, 160.0);
+        for panel in [Panel::BumperFront, Panel::Bonnet, Panel::Windscreen] {
+            assert_ne!(
+                damage.dents & dent_bit(VehiclePart::Panel(panel)),
+                0,
+                "{panel:?}"
+            );
+        }
+        assert_eq!(damage.dents & dent_bit(VehiclePart::Panel(Panel::Boot)), 0);
+        // Hit on the left: the left doors buckle, not the right.
+        damage.crash(8.0, Vec3::NEG_X);
+        assert_ne!(damage.dents & dent_bit(VehiclePart::Door(0)), 0);
+        assert_ne!(damage.dents & dent_bit(VehiclePart::Door(2)), 0);
+        assert_eq!(damage.dents & dent_bit(VehiclePart::Door(1)), 0);
+    }
+    #[test]
+    fn a_burning_car_explodes_once_and_stays_a_wreck() {
+        let mut damage = Damage::default();
+        damage.hurt(700.0);
+        assert!(!damage.burning() && !damage.update(1.0));
+        damage.hurt(100.0);
+        assert!(damage.burning());
+        let mut seconds = 0.0;
+        while !damage.update(0.1) {
+            seconds += 0.1;
+            assert!(seconds < 10.0, "never exploded");
+        }
+        assert!((3.5..5.5).contains(&seconds), "{seconds}");
+        assert!(damage.wrecked && !damage.burning());
+        assert!(!damage.update(0.1), "explodes only once");
+        assert_eq!(damage.hurt(100.0), 0.0);
+    }
+    #[test]
+    fn wheels_roll_and_steer_and_doors_swing_out_on_their_side() {
+        let wheel = RigPiece {
+            part: VehiclePart::Wheel {
+                front: true,
+                left: true,
+            },
+            damaged: false,
+            pivot: Vec3::new(-0.8, 0.3, -1.3),
+            radius: 0.3,
+        };
+        let top = wheel.pivot + Vec3::Y * 0.3;
+        let rolled = Look {
+            travel: 0.3 * std::f32::consts::FRAC_PI_2,
+            ..Look::default()
+        };
+        // A quarter turn forwards brings the top of the tyre to the front (-Z).
+        let moved = wheel.transform(&rolled).unwrap().transform_point3(top);
+        assert!(
+            (moved - (wheel.pivot - Vec3::Z * 0.3)).length() < 1e-4,
+            "{moved}"
+        );
+        let steered = Look {
+            steer: 0.4,
+            ..Look::default()
+        };
+        let hub = wheel
+            .transform(&steered)
+            .unwrap()
+            .transform_point3(wheel.pivot);
+        assert!((hub - wheel.pivot).length() < 1e-5, "steers about its hub");
+        for (door, outward) in [(0_u8, -1.0_f32), (1, 1.0)] {
+            let piece = RigPiece {
+                part: VehiclePart::Door(door),
+                damaged: false,
+                pivot: Vec3::new(outward * 0.9, 0.5, -0.6),
+                radius: 0.0,
+            };
+            let mut look = Look::default();
+            look.doors[usize::from(door)] = 1.0;
+            // The back edge of the door swings away from the car.
+            let back = piece.pivot + Vec3::Z * 1.1;
+            let open = piece.transform(&look).unwrap().transform_point3(back);
+            assert!(open.x * outward > 0.9 + 0.5, "door {door}: {open}");
+        }
+    }
+    #[test]
+    fn dented_parts_swap_for_their_damaged_look() {
+        let piece = |damaged| RigPiece {
+            part: VehiclePart::Panel(Panel::Bonnet),
+            damaged,
+            pivot: Vec3::ZERO,
+            radius: 0.0,
+        };
+        let intact = Look::default();
+        let dented = Look {
+            dents: dent_bit(VehiclePart::Panel(Panel::Bonnet)),
+            ..Look::default()
+        };
+        assert!(piece(false).transform(&intact).is_some());
+        assert!(piece(true).transform(&intact).is_none());
+        assert!(piece(false).transform(&dented).is_none());
+        assert!(piece(true).transform(&dented).is_some());
+    }
+    #[test]
+    fn driving_into_a_wall_hurts_the_car() {
+        let world = CollisionWorld::from_batches(&[
+            floor(-1000.0, 1000.0, 0.0),
+            mesh(&[
+                [-10.0, -1.0, 10.0],
+                [10.0, -1.0, 10.0],
+                [10.0, 5.0, 10.0],
+                [-10.0, -1.0, 10.0],
+                [10.0, 5.0, 10.0],
+                [-10.0, 5.0, 10.0],
+            ]),
+        ]);
+        let mut car = Car::new(Vec3::Y * 0.6, 0.6);
+        car.speed = 25.0;
+        for _ in 0..120 {
+            car.step(&world, 1.0, 0.0, false, 1.0, 1.0 / 60.0);
+        }
+        assert!(car.damage.health < FULL_HEALTH - 100.0, "{:?}", car.damage);
+        assert_ne!(
+            car.damage.dents & dent_bit(VehiclePart::Panel(Panel::BumperFront)),
+            0
+        );
+        assert!(car.look().travel > 5.0, "the wheels turned on the way");
     }
     #[test]
     fn measured_size_follows_the_model_and_stays_sane() {

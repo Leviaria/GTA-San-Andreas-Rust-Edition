@@ -155,6 +155,7 @@ pub(super) fn duplicate(device: &wgpu::Device, batches: &[GpuBatch]) -> Vec<GpuB
             animated: b.animated,
             uv_animation: b.uv_animation.clone(),
             base: b.base.clone(),
+            piece: b.piece,
         })
         .collect()
 }
@@ -710,13 +711,12 @@ impl State {
                 let feet = Vec3::from_array(car.position);
                 let rotation = sa_scene::vehicle::model_rotation(car.yaw, car.pitch, car.roll);
                 for batch in &actor.car {
-                    let mut raw = batch.base.clone();
-                    for v in raw.as_chunks_mut::<9>().0.iter_mut() {
-                        let p = rotation * Vec3::new(v[0], v[1], v[2])
-                            + feet
-                            + Vec3::Y * actor.clearance;
-                        v[..3].copy_from_slice(&p.to_array());
-                    }
+                    let raw = crate::car_damage::pose_car(
+                        batch,
+                        &Default::default(),
+                        rotation,
+                        feet + Vec3::Y * actor.clearance,
+                    );
                     self.queue
                         .write_buffer(&batch.buffer, 0, bytemuck::cast_slice(&raw));
                 }

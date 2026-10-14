@@ -366,14 +366,103 @@ pub fn decode_dff_with_uv(
 ) -> Result<Vec<Geometry>> {
     decode_dff_parts(data, false, tracks)
 }
+/// The intact look of a vehicle: damaged variants are left out.
 pub fn decode_vehicle_dff(data: &[u8]) -> Result<Vec<Geometry>> {
-    decode_dff_parts(data, true, &HashMap::new())
+    Ok(decode_vehicle_pieces(data)?
+        .into_iter()
+        .filter(|piece| !piece.damaged)
+        .map(|piece| piece.geometry)
+        .collect())
+}
+/// Every visible atomic of a vehicle, labelled with the part it belongs to,
+/// including the `_dam` variants the game swaps in after a crash.
+pub fn decode_vehicle_pieces(data: &[u8]) -> Result<Vec<VehiclePiece>> {
+    decode_pieces(data, true, &HashMap::new())
+}
+/// A moving or breakable part of a vehicle, named by the frames every San
+/// Andreas car model uses (`wheel_lf_dummy`, `door_rf_dummy`, `bonnet_dummy`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VehiclePart {
+    Body,
+    /// `left` wheels sit on the model's -X side; front wheels steer.
+    Wheel {
+        front: bool,
+        left: bool,
+    },
+    /// 0 front left, 1 front right, 2 rear left, 3 rear right.
+    Door(u8),
+    Panel(Panel),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Panel {
+    Bonnet,
+    Boot,
+    BumperFront,
+    BumperRear,
+    WingLeft,
+    WingRight,
+    Windscreen,
+}
+impl VehiclePart {
+    /// The part named by a frame such as `door_lf_dummy` or `bonnet_ok`.
+    pub fn from_frame(name: &str) -> Option<Self> {
+        let base = ["_dummy", "_ok", "_dam"]
+            .iter()
+            .find_map(|suffix| name.strip_suffix(suffix))
+            .unwrap_or(name);
+        if let Some(wheel) = base.strip_prefix("wheel_") {
+            let mut letters = wheel.chars();
+            let side = letters.next()?;
+            let along = letters.next()?;
+            return (letters.next().is_none() && matches!(side, 'l' | 'r')).then_some(
+                Self::Wheel {
+                    front: along == 'f',
+                    left: side == 'l',
+                },
+            );
+        }
+        Some(match base {
+            "door_lf" => Self::Door(0),
+            "door_rf" => Self::Door(1),
+            "door_lr" => Self::Door(2),
+            "door_rr" => Self::Door(3),
+            "bonnet" => Self::Panel(Panel::Bonnet),
+            "boot" => Self::Panel(Panel::Boot),
+            "bump_front" => Self::Panel(Panel::BumperFront),
+            "bump_rear" => Self::Panel(Panel::BumperRear),
+            "wing_lf" => Self::Panel(Panel::WingLeft),
+            "wing_rf" => Self::Panel(Panel::WingRight),
+            "windscreen" => Self::Panel(Panel::Windscreen),
+            _ => return None,
+        })
+    }
+}
+/// One atomic of a vehicle model in model space.
+#[derive(Clone)]
+pub struct VehiclePiece {
+    pub geometry: Geometry,
+    pub part: VehiclePart,
+    /// The `_dam` look of a part, shown once that part has been hit.
+    pub damaged: bool,
+    /// Where the part turns: the hinge of a door, the hub of a wheel.
+    pub pivot: [f32; 3],
 }
 fn decode_dff_parts(
     data: &[u8],
     vehicle: bool,
     shared: &HashMap<String, std::sync::Arc<uvanim::UvAnimation>>,
 ) -> Result<Vec<Geometry>> {
+    Ok(decode_pieces(data, vehicle, shared)?
+        .into_iter()
+        .filter(|piece| !piece.damaged)
+        .map(|piece| piece.geometry)
+        .collect())
+}
+fn decode_pieces(
+    data: &[u8],
+    vehicle: bool,
+    shared: &HashMap<String, std::sync::Arc<uvanim::UvAnimation>>,
+) -> Result<Vec<VehiclePiece>> {
     // Some original SA models serialize a UV animation dictionary before
     // the clump. Its presence must not hide otherwise supported geometry.
     let mut stream = data;
@@ -489,13 +578,10 @@ fn decode_dff_parts(
         let gi = u32at(s, 4)? as usize;
         ensure!(fi < nf && gi < ng, "invalid atomic references");
         let frame_name = frame_names.get(fi).map(String::as_str).unwrap_or("");
-        if vehicle
-            && (frame_name.ends_with("_dam")
-                || frame_name.ends_with("_vlo")
-                || frame_name.starts_with("extra"))
-        {
+        if vehicle && (frame_name.ends_with("_vlo") || frame_name.starts_with("extra")) {
             continue;
         }
+        let damaged = vehicle && frame_name.ends_with("_dam");
         if vehicle
             && frame_name == "wheel"
             && frame_names
@@ -509,10 +595,41 @@ fn decode_dff_parts(
                     for vertex in &mut wheel.positions {
                         *vertex = transform(&matrix, *vertex, true);
                     }
-                    out.push(wheel);
+                    out.push(VehiclePiece {
+                        geometry: wheel,
+                        part: VehiclePart::from_frame(name).unwrap_or(VehiclePart::Body),
+                        damaged: false,
+                        pivot: [matrix[9], matrix[10], matrix[11]],
+                    });
                 }
             }
             continue;
+        }
+        // The part comes from the frame itself or the nearest named dummy
+        // above it; that dummy's origin is the hinge.
+        let mut part = (
+            VehiclePart::Body,
+            [frames[fi][9], frames[fi][10], frames[fi][11]],
+        );
+        if vehicle {
+            let mut at = fi as i32;
+            for _ in 0..nf {
+                if at < 0 {
+                    break;
+                }
+                let index = at as usize;
+                if let Some(found) = frame_names
+                    .get(index)
+                    .and_then(|name| VehiclePart::from_frame(name))
+                {
+                    let m = &frames[index];
+                    part = (found, [m[9], m[10], m[11]]);
+                    if frame_names[index].ends_with("_dummy") {
+                        break;
+                    }
+                }
+                at = parents[index];
+            }
         }
         let mut g = geometries[gi].clone();
         if std::mem::replace(&mut effects_seen[gi], true) {
@@ -525,7 +642,12 @@ fn decode_dff_parts(
         for v in &mut g.normals {
             *v = transform(&frames[fi], *v, false);
         }
-        out.push(g);
+        out.push(VehiclePiece {
+            geometry: g,
+            part: part.0,
+            damaged,
+            pivot: part.1,
+        });
     }
     Ok(out)
 }
@@ -918,7 +1040,49 @@ mod tests {
                 decode_vehicle_dff(&fixture).unwrap().len(),
                 usize::from(visible)
             );
+            // Damaged variants are kept as pieces for when the car is hit.
+            let pieces = decode_vehicle_pieces(&fixture).unwrap();
+            let kept = !name.ends_with("_vlo") && !name.starts_with("extra");
+            assert_eq!(pieces.len(), usize::from(kept), "{name}");
+            if let Some(piece) = pieces.first() {
+                assert_eq!(piece.damaged, name.ends_with("_dam"), "{name}");
+            }
         }
+    }
+    #[test]
+    fn vehicle_parts_come_from_frame_names() {
+        assert_eq!(
+            VehiclePart::from_frame("wheel_lf_dummy"),
+            Some(VehiclePart::Wheel {
+                front: true,
+                left: true
+            })
+        );
+        assert_eq!(
+            VehiclePart::from_frame("wheel_rb_dummy"),
+            Some(VehiclePart::Wheel {
+                front: false,
+                left: false
+            })
+        );
+        assert_eq!(
+            VehiclePart::from_frame("wheel_lm_dummy"),
+            Some(VehiclePart::Wheel {
+                front: false,
+                left: true
+            })
+        );
+        assert_eq!(
+            VehiclePart::from_frame("door_rr_dam"),
+            Some(VehiclePart::Door(3))
+        );
+        assert_eq!(
+            VehiclePart::from_frame("bump_front_ok"),
+            Some(VehiclePart::Panel(Panel::BumperFront))
+        );
+        assert_eq!(VehiclePart::from_frame("chassis"), None);
+        assert_eq!(VehiclePart::from_frame("chassis_dummy"), None);
+        assert_eq!(VehiclePart::from_frame("wheel"), None);
     }
     #[test]
     fn invalid_uvs_have_fallback_but_invalid_positions_are_rejected() {

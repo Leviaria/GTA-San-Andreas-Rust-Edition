@@ -418,7 +418,7 @@ impl WorldLoader {
             );
             for vehicle in manifest.vehicles {
                 vehicle.validate()?;
-                let geometry = sa_assets::decode_vehicle_dff(&resource(&folder, &vehicle.dff)?)
+                let geometry = sa_assets::decode_vehicle_pieces(&resource(&folder, &vehicle.dff)?)
                     .with_context(|| format!("custom vehicle {}", vehicle.dff))?;
                 let dictionary = vehicle
                     .txd

@@ -76,6 +76,41 @@ impl Footprint {
         }
         best.map(|(depth, away)| away * depth)
     }
+    /// How far along a ray from `origin` (unit `direction`) it first
+    /// enters this box, if within `range`.
+    pub fn ray_hit(&self, origin: Vec3, direction: Vec3, range: f32) -> Option<f32> {
+        let offset = origin - self.center;
+        let (mut near, mut far) = (0.0_f32, range);
+        for (start, step, low, high) in [
+            (
+                offset.dot(self.side()),
+                direction.dot(self.side()),
+                -self.half.x,
+                self.half.x,
+            ),
+            (
+                offset.dot(self.forward()),
+                direction.dot(self.forward()),
+                -self.half.y,
+                self.half.y,
+            ),
+            (origin.y, direction.y, self.bottom, self.top),
+        ] {
+            if step.abs() < 1e-6 {
+                if start < low || start > high {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((low - start) / step, (high - start) / step);
+            near = near.max(a.min(b));
+            far = far.min(a.max(b));
+            if near > far {
+                return None;
+            }
+        }
+        Some(near)
+    }
     /// The smallest horizontal move that takes a round body of `radius` at
     /// `point` out of this box.
     pub fn push_point_out(&self, point: Vec3, radius: f32, height: f32) -> Option<Vec3> {
@@ -171,18 +206,38 @@ impl State {
                 let Some(push) = mine.push_out_of(other) else {
                     continue;
                 };
-                let impact = (car.velocity() - *velocity).length();
+                // Only the speed into the other car counts, so resting
+                // against it does no further harm.
+                let normal = push.normalize_or_zero();
+                let impact = (*velocity - car.velocity()).dot(normal).max(0.0);
                 let before = car.position;
                 car.collide(world, push, *velocity);
                 moved += car.position - before;
                 if let Owner::Traffic(index) = owner {
                     if let Some(hit) = self.traffic.cars.get_mut(*index) {
-                        hit.knock(impact);
+                        hit.knock(impact, normal);
                     }
                 }
             }
             // The chase camera follows the body it was placed behind.
             self.position += moved;
+            // People in the way are knocked down, harder the faster the car.
+            let speed = car.velocity().length();
+            let mine = Footprint::car(car.position - Vec3::Y * car.clearance, car.yaw, car.size);
+            let hits: Vec<(usize, Vec3)> = self
+                .crowd
+                .walkers
+                .iter()
+                .enumerate()
+                .filter(|(_, walker)| walker.dead_for.is_none())
+                .filter_map(|(index, walker)| {
+                    mine.push_point_out(walker.feet, PED_RADIUS, 1.8)
+                        .map(|away| (index, away))
+                })
+                .collect();
+            for (index, away) in hits {
+                self.crowd.run_over(index, speed, away);
+            }
         } else if self.walking {
             let Some(player) = &mut self.player else {
                 return;
@@ -202,6 +257,21 @@ mod tests {
     use super::*;
 
     const SALOON: [f32; 3] = [0.95, 2.4, 1.5];
+
+    #[test]
+    fn shots_hit_a_car_box_and_miss_beside_or_over_it() {
+        let car = Footprint::car(Vec3::ZERO, 0.0, SALOON);
+        // From the side at door height.
+        let hit = car.ray_hit(Vec3::new(-10.0, 1.0, 0.0), Vec3::X, 50.0);
+        assert!((hit.unwrap() - (10.0 - 0.95)).abs() < 1e-4, "{hit:?}");
+        // Too far away, beside it, or over the roof.
+        assert_eq!(car.ray_hit(Vec3::new(-10.0, 1.0, 0.0), Vec3::X, 5.0), None);
+        assert_eq!(car.ray_hit(Vec3::new(-10.0, 1.0, 3.0), Vec3::X, 50.0), None);
+        assert_eq!(car.ray_hit(Vec3::new(-10.0, 2.0, 0.0), Vec3::X, 50.0), None);
+        // Shooting down onto the bonnet from above.
+        let down = car.ray_hit(Vec3::new(0.0, 6.0, 2.0), Vec3::NEG_Y, 50.0);
+        assert!((down.unwrap() - 4.5).abs() < 1e-4, "{down:?}");
+    }
 
     #[test]
     fn separate_cars_do_not_touch() {

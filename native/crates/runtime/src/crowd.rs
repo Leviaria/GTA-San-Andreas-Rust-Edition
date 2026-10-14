@@ -40,6 +40,10 @@ pub struct Walker {
     pub flinch: bool,
     /// Seconds left running away after gunfire nearby.
     pub panic: f32,
+    /// How fast a body knocked down by a car or a blast is sliding.
+    pub thrown: Vec3,
+    /// Seconds before a car can hurt this walker again.
+    bumped: f32,
 }
 
 /// Running pace while fleeing.
@@ -48,6 +52,11 @@ const FLEE: f32 = 4.5;
 const BODY_SECONDS: f32 = 20.0;
 /// People this close to gunfire run.
 const HEARING: f32 = 30.0;
+/// A car slower than this in m/s only nudges people.
+const RUN_OVER_SPEED: f32 = 3.0;
+/// Health a walker loses per m/s of the car that hits them: about
+/// 70 km/h kills.
+const RUN_OVER_DAMAGE: f32 = 5.0;
 /// Rough body size for hits: a vertical capsule.
 const BODY_HEIGHT: f32 = 1.8;
 const BODY_RADIUS: f32 = 0.4;
@@ -90,9 +99,13 @@ impl Crowd {
         self.walkers.truncate(limit);
         let positions: Vec<Vec3> = self.walkers.iter().map(|w| w.feet).collect();
         for (index, walker) in self.walkers.iter_mut().enumerate() {
+            walker.bumped = (walker.bumped - dt).max(0.0);
             if let Some(dead) = &mut walker.dead_for {
                 *dead += dt;
                 walker.speed = 0.0;
+                // A body thrown by a car or a blast slides to a stop.
+                walker.feet += walker.thrown * dt;
+                walker.thrown *= (-3.0 * dt).exp();
                 continue;
             }
             walker.panic = (walker.panic - dt).max(0.0);
@@ -172,6 +185,8 @@ impl Crowd {
             dead_for: None,
             flinch: false,
             panic: 0.0,
+            thrown: Vec3::ZERO,
+            bumped: 0.0,
         };
         place(&mut walker, paths);
         if self
@@ -219,6 +234,37 @@ impl Crowd {
         false
     }
 
+    /// A car at `speed` m/s ran into this walker, pushing along `away`.
+    /// A slow nudge does nothing; faster it hurts, and from about 70 km/h
+    /// it kills and throws the body. Returns true when it killed.
+    pub fn run_over(&mut self, index: usize, speed: f32, away: Vec3) -> bool {
+        let Some(walker) = self.walkers.get_mut(index) else {
+            return false;
+        };
+        if speed < RUN_OVER_SPEED || walker.bumped > 0.0 || walker.dead_for.is_some() {
+            return false;
+        }
+        walker.bumped = 1.0;
+        let killed = self.damage(index, speed * RUN_OVER_DAMAGE);
+        if killed {
+            self.walkers[index].thrown =
+                Vec3::new(away.x, 0.0, away.z).normalize_or_zero() * speed * 0.6;
+        }
+        killed
+    }
+    /// An explosion at `at`: everyone near is hurt, the closest are killed
+    /// and thrown, and everyone further out runs.
+    pub fn blast(&mut self, at: Vec3, radius: f32, damage: f32) {
+        self.scare(at);
+        for index in 0..self.walkers.len() {
+            let offset = self.walkers[index].feet - at;
+            let distance = offset.length();
+            if distance < radius && self.damage(index, damage * (1.0 - distance / radius)) {
+                self.walkers[index].thrown =
+                    Vec3::new(offset.x, 0.0, offset.z).normalize_or_zero() * (radius - distance);
+            }
+        }
+    }
     /// Everyone within earshot of a shot runs for a while.
     pub fn scare(&mut self, at: Vec3) {
         for walker in &mut self.walkers {
@@ -489,6 +535,44 @@ mod tests {
         let body = crowd.walkers[0].feet;
         crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 0.5);
         assert_eq!(crowd.walkers[0].feet, body, "the dead do not walk");
+    }
+
+    #[test]
+    fn a_fast_car_kills_and_throws_but_a_slow_one_only_nudges() {
+        let paths = pavement();
+        let mut crowd = Crowd::default();
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 1.0);
+        assert!(!crowd.run_over(0, 2.0, Vec3::X));
+        assert_eq!(crowd.walkers[0].health, 100.0, "a nudge does no harm");
+        assert!(!crowd.run_over(0, 8.0, Vec3::X), "hurt, not killed");
+        assert_eq!(crowd.walkers[0].health, 60.0);
+        assert!(!crowd.run_over(0, 30.0, Vec3::X), "not hit twice at once");
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 1.1);
+        assert!(crowd.run_over(0, 25.0, Vec3::X));
+        let body = crowd.walkers[0].feet;
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 0.5);
+        let slid = crowd.walkers[0].feet - body;
+        assert!(
+            slid.x > 1.0 && slid.z.abs() < 1e-4,
+            "thrown along the hit: {slid}"
+        );
+    }
+
+    #[test]
+    fn a_blast_kills_close_by_and_scares_further_out() {
+        let paths = pavement();
+        let mut crowd = Crowd::default();
+        crowd.update(&paths, Vec3::ZERO, &[], &[1], 1, 1.0);
+        let at = crowd.walkers[0].feet;
+        crowd.blast(at + Vec3::X * 20.0, 9.0, 250.0);
+        assert!(crowd.walkers[0].dead_for.is_none());
+        assert!(crowd.walkers[0].panic > 0.0);
+        crowd.blast(at + Vec3::X * 2.0, 9.0, 250.0);
+        assert!(crowd.walkers[0].dead_for.is_some());
+        assert!(
+            crowd.walkers[0].thrown.x < 0.0,
+            "thrown away from the blast"
+        );
     }
 
     #[test]
