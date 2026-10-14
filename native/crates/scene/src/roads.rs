@@ -89,8 +89,10 @@ fn parse_area_of(data: &[u8], peds: bool) -> Result<Area> {
             let flags = u32at(row, 10);
             (
                 (u16at(row, 4), u16at(row, 6)),
-                ((flags >> 8) & 7) as u8,
+                // Lanes heading towards the target are the first count; in
+                // the game this puts motorway traffic on the right.
                 ((flags >> 11) & 7) as u8,
+                ((flags >> 8) & 7) as u8,
             )
         })
         .collect();
@@ -434,7 +436,7 @@ mod tests {
             rows.extend(area.to_le_bytes());
             rows.extend(node.to_le_bytes());
             rows.extend([0, 0]);
-            rows.extend((away << 8 | towards << 11).to_le_bytes());
+            rows.extend((towards << 8 | away << 11).to_le_bytes());
         }
         let at = 20 + nodes * NODE_SIZE;
         file.splice(at..at, rows);
