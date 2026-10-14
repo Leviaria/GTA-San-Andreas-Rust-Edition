@@ -109,6 +109,8 @@ pub struct Animator {
     /// An upper-body one-shot (firing, reloading, a punch, a flinch) laid
     /// over whatever the legs are doing.
     overlay: Option<Track>,
+    /// Full-body clips still to play after the current action, in order.
+    queued: std::collections::VecDeque<(String, f32)>,
 }
 
 impl Default for Animator {
@@ -121,6 +123,7 @@ impl Default for Animator {
             civilian: false,
             start: 0.0,
             overlay: None,
+            queued: std::collections::VecDeque::new(),
         }
     }
 }
@@ -187,6 +190,23 @@ impl Animator {
         Some(length)
     }
 
+    /// Plays clips one after another as full-body actions, skipping any the
+    /// ped does not have, such as opening, climbing in and closing a car
+    /// door. Returns the total length, or `None` when none exist.
+    pub fn perform_chain(
+        &mut self,
+        names: &[&str],
+        duration: impl Fn(&str) -> Option<f32>,
+    ) -> Option<f32> {
+        let mut steps = names
+            .iter()
+            .filter_map(|&name| duration(name).map(|d| (name.to_owned(), d)));
+        let (first, length) = steps.next()?;
+        self.perform(&[&first], &duration)?;
+        self.queued = steps.collect();
+        Some(length + self.queued.iter().map(|(_, d)| d).sum::<f32>())
+    }
+
     /// Plays the first clip that exists on the spine and arms only, from
     /// its start. Returns its length, or `None` when the ped has none.
     pub fn overlay(
@@ -222,8 +242,26 @@ impl Animator {
             .tracks
             .last()
             .is_some_and(|t| !t.motion.looped() && t.seconds >= t.duration);
+        if current == Motion::Action && finished {
+            if let Some((clip, length)) = self.queued.pop_front() {
+                self.tracks.push(Track {
+                    motion: Motion::Action,
+                    clip,
+                    seconds: 0.0,
+                    duration: length,
+                    weight: 0.0,
+                });
+                self.fade = 0.08;
+            }
+        }
+        let current = self.motion();
+        let finished = self
+            .tracks
+            .last()
+            .is_some_and(|t| !t.motion.looped() && t.seconds >= t.duration);
         if input.dead {
             self.overlay = None;
+            self.queued.clear();
             self.play(Motion::Dead, 0.1, &duration);
         } else if current == Motion::Action && !finished {
             // Let a one-shot such as getting into a car play out.
@@ -583,6 +621,24 @@ mod tests {
         }
         assert_eq!(a.motion(), Motion::Idle);
         assert_eq!(a.perform(&["nope"], minimal), None);
+    }
+
+    #[test]
+    fn chains_play_each_existing_clip_in_turn() {
+        let mut a = Animator::default();
+        a.update(ground(0.0), DT, all);
+        let some = |name: &str| (name != "nope").then(|| all(name)).flatten();
+        let total = a.perform_chain(&["car_open_lhs", "nope", "car_getin_lhs"], some);
+        assert_eq!(total, Some(2.0), "missing clips are skipped");
+        let mut seen = vec![a.clip().to_owned()];
+        for _ in 0..150 {
+            a.update(ground(0.0), DT, all);
+            if seen.last().map(String::as_str) != Some(a.clip()) {
+                seen.push(a.clip().to_owned());
+            }
+        }
+        assert_eq!(seen, ["car_open_lhs", "car_getin_lhs", "idle_stance"]);
+        assert_eq!(a.perform_chain(&["nope"], minimal), None);
     }
 
     #[test]
