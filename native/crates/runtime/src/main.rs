@@ -96,6 +96,17 @@ fn headlight_vertices(car: &sa_scene::vehicle::Car) -> [sa_scene::Vertex; HEADLI
     }
     out
 }
+/// Which door a ped at `offset` from a car uses: "lhs" on the driver's
+/// side, the side `Car::exit_player` tries first, otherwise "rhs".
+fn door_side(car_yaw: f32, offset: Vec3) -> &'static str {
+    let driver = Vec3::new(car_yaw.cos(), 0.0, -car_yaw.sin());
+    if offset.dot(driver) >= 0.0 {
+        "lhs"
+    } else {
+        "rhs"
+    }
+}
+
 /// Corona and light-pool batches, drawn by their own additive pipelines.
 fn is_glow(batch: &GpuBatch) -> bool {
     batch.texture_key == sa_scene::lights::CORONA_KEY
@@ -432,10 +443,13 @@ impl State {
                     self.ped_yaw = car.yaw;
                     self.ped_animator.reset();
                     if let Some((ped, _)) = &self.ped {
+                        // Climb out on the side the player ends up on, then
+                        // shut the door behind.
+                        let side = door_side(car.yaw, player.feet - car.position);
+                        let steps = [format!("car_getout_{side}"), format!("car_close_{side}")];
+                        let steps: Vec<&str> = steps.iter().map(String::as_str).collect();
                         self.ped_animator
-                            .perform(&["car_getout_lhs", "car_getout_rhs"], |name| {
-                                ped.clip_duration(name)
-                            });
+                            .perform_chain(&steps, |name| ped.clip_duration(name));
                     }
                     self.player = Some(player);
                     self.driving = false;
@@ -446,20 +460,27 @@ impl State {
                 // Turn to the car and climb in before driving off.
                 let feet = self.player.as_ref().map_or(self.position, |p| p.feet);
                 let to_car = car.position - feet;
+                // Open the door on the side the player stands, climb in and
+                // pull it shut, as in SA.
+                let side = door_side(car.yaw, -to_car);
+                let steps = [
+                    format!("car_open_{side}"),
+                    format!("car_getin_{side}"),
+                    format!("car_closedoor_{side}"),
+                ];
+                let steps: Vec<&str> = steps.iter().map(String::as_str).collect();
                 let climb =
                     self.ped
                         .as_ref()
                         .zip(self.player.as_ref())
                         .and_then(|((ped, _), _)| {
                             self.ped_animator
-                                .perform(&["car_getin_lhs", "car_getin_rhs"], |name| {
-                                    ped.clip_duration(name)
-                                })
+                                .perform_chain(&steps, |name| ped.clip_duration(name))
                         });
                 match climb.filter(|_| self.walking && self.third_person) {
                     Some(length) => {
                         self.ped_yaw = to_car.x.atan2(to_car.z);
-                        self.entering_car = Some(length.min(1.2));
+                        self.entering_car = Some(length.min(4.0));
                     }
                     None => {
                         self.driving = true;
