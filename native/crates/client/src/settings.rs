@@ -50,6 +50,9 @@ pub struct Settings {
     pub atmospheric_fog: bool,
     pub sun_lighting: f32,
     pub sun_shadows: bool,
+    /// Wet roads that reflect the scene, softer sun shadows and sun glints on
+    /// wet ground. Costs more GPU time, so it stays off unless picked.
+    pub enhanced_lighting: bool,
     /// Fixed hour of day, or `None` for the running day/night cycle.
     pub fixed_hour: Option<u8>,
     /// Fixed timecyc weather, or `None` for weather that changes by area.
@@ -93,6 +96,7 @@ impl Default for Settings {
             atmospheric_fog: true,
             sun_lighting: 0.35,
             sun_shadows: true,
+            enhanced_lighting: false,
             fixed_hour: None,
             fixed_weather: None,
             fsr1: true,

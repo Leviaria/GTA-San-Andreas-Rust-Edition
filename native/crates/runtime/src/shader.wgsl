@@ -39,14 +39,64 @@ struct VertexOut {
 // original prelit look), environment.z: sun shadow strength, environment.w: weather
 // haze density relative to clear weather. The face normal comes from screen-space derivatives,
 // so moving cars and animated peds need no extra vertex data.
+var<private> DISC: array<vec2<f32>, 12> = array<vec2<f32>, 12>(
+    vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457),
+    vec2<f32>(-0.203, 0.621), vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480),
+    vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893), vec2<f32>(0.507, 0.064),
+    vec2<f32>(0.896, 0.412), vec2<f32>(-0.322, -0.933), vec2<f32>(-0.792, -0.598),
+);
+// Must match the puddle noise in postprocess.wgsl.
+fn hash(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+fn noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2<f32>(1.0, 0.0)), u.x), mix(hash(i + vec2<f32>(0.0, 1.0)), hash(i + vec2<f32>(1.0, 1.0)), u.x), u.y);
+}
+fn puddles(p: vec2<f32>, wetness: f32) -> f32 {
+    let n = noise(p * 0.18) * 0.65 + noise(p * 0.7) * 0.35;
+    let pools = smoothstep(0.55 - wetness * 0.2, 0.7 - wetness * 0.2, n);
+    return wetness * mix(0.35, 1.0, pools);
+}
+fn face_normal(world_position: vec3<f32>) -> vec3<f32> {
+    var normal = normalize(cross(dpdx(world_position), dpdy(world_position)));
+    if (dot(normal, camera.eye.xyz - world_position) < 0.0) { normal = -normal; }
+    return normal;
+}
+// Enhanced lighting: wet ground is darker and catches a sharp sun glint;
+// the reflection itself is added by the finishing pass. sun_color.w carries
+// the wetness and is zero when enhanced lighting is off.
+fn wet_ground(color: vec3<f32>, world_position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let wetness = camera.sun_color.w;
+    if (wetness <= 0.0) { return color; }
+    let wet = puddles(world_position.xz, wetness) * smoothstep(0.85, 0.97, normal.y);
+    let view = normalize(camera.eye.xyz - world_position);
+    let half_way = normalize(view + camera.sun.xyz);
+    let glint = pow(max(dot(vec3<f32>(0.0, 1.0, 0.0), half_way), 0.0), 220.0) * camera.sun.w * sun_shadow(world_position);
+    return color * (1.0 - 0.4 * wet) + camera.sun_color.rgb * glint * wet * 2.0;
+}
 fn sun_shadow(world_position: vec3<f32>) -> f32 {
     let clip = camera.light * vec4<f32>(world_position, 1.0);
     let uv = clip.xy * vec2<f32>(0.5, -0.5) + 0.5;
     let texel = 1.0 / 2048.0;
     var lit = 0.0;
-    for (var y = -1; y <= 1; y += 1) {
-        for (var x = -1; x <= 1; x += 1) {
-            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(f32(x), f32(y)) * texel, clip.z);
+    if (camera.eye.w > 0.5) {
+        // Enhanced lighting: a wider, per-pixel rotated disc gives soft
+        // penumbras instead of the stepped 3x3 edge.
+        let angle = hash(world_position.xz * 7.0 + world_position.y) * 6.2831853;
+        let spin = mat2x2<f32>(cos(angle), sin(angle), -sin(angle), cos(angle));
+        for (var i = 0; i < 12; i += 1) {
+            let offset = spin * DISC[i] * 2.5 * texel;
+            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + offset, clip.z);
+        }
+        lit *= 9.0 / 12.0;
+    } else {
+        for (var y = -1; y <= 1; y += 1) {
+            for (var x = -1; x <= 1; x += 1) {
+                lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(f32(x), f32(y)) * texel, clip.z);
+            }
         }
     }
     // Fade out towards the edge of the shadowed square instead of cutting off.
@@ -55,9 +105,7 @@ fn sun_shadow(world_position: vec3<f32>) -> f32 {
     let covered = select(0.0, inside, clip.z > 0.0 && clip.z < 1.0);
     return mix(1.0, lit / 9.0, covered);
 }
-fn sun_light(world_position: vec3<f32>) -> vec3<f32> {
-    var normal = normalize(cross(dpdx(world_position), dpdy(world_position)));
-    if (dot(normal, camera.eye.xyz - world_position) < 0.0) { normal = -normal; }
+fn sun_light(world_position: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let facing = max(dot(normal, camera.sun.xyz), 0.0);
     let shadow = sun_shadow(world_position);
     let sky = mix(vec3<f32>(0.62, 0.60, 0.58), vec3<f32>(0.72, 0.76, 0.84), normal.y * 0.5 + 0.5);
@@ -67,22 +115,27 @@ fn sun_light(world_position: vec3<f32>) -> vec3<f32> {
     let shade = mix(1.0, 0.55, (1.0 - shadow) * camera.environment.z * camera.sun.w * smoothstep(0.0, 0.2, facing));
     return mix(vec3<f32>(1.0), lit, camera.environment.y) * shade * camera.ambient.rgb;
 }
-fn shade(color: vec4<f32>, input: VertexOut, light: vec3<f32>) -> vec4<f32> {
+fn shade(color: vec4<f32>, input: VertexOut, light: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
     let density = 0.00045 * max(camera.environment.w, 1.0);
     let haze = (1.0 - exp(-distance(input.world_position, camera.eye.xyz) * density)) * camera.environment.x;
-    return vec4<f32>(mix(color.rgb * light, camera.sky.rgb, haze), color.a);
+    let lit = wet_ground(color.rgb * light, input.world_position, normal);
+    return vec4<f32>(mix(lit, camera.sky.rgb, haze), color.a);
 }
 @fragment fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-    let light = sun_light(input.world_position);
+    // Derivatives are taken before any discard.
+    let normal = face_normal(input.world_position);
+    let light = sun_light(input.world_position, normal);
     let color = textureSample(image, image_sampler, input.uv) * input.color;
     if (color.a < 0.5) { discard; }
-    return shade(color, input, light);
+    return shade(color, input, light, normal);
 }
 @fragment fn fs_blended(input: VertexOut) -> @location(0) vec4<f32> {
-    let light = sun_light(input.world_position);
+    // Derivatives are taken before any discard.
+    let normal = face_normal(input.world_position);
+    let light = sun_light(input.world_position, normal);
     let color = textureSample(image, image_sampler, input.uv) * input.color;
     if (color.a < 0.04) { discard; }
-    return shade(color, input, light);
+    return shade(color, input, light, normal);
 }
 struct ShadowOut {
     @builtin(position) position: vec4<f32>,

@@ -1,6 +1,21 @@
 //! Linear HDR scene target followed by spatial scaling and image finishing.
 use crate::settings::Settings;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
+
+/// What the finishing pass needs to reflect the scene in wet ground.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Reflections {
+    pub view_projection: Mat4,
+    pub eye: Vec3,
+    /// 0 turns reflections off.
+    pub wetness: f32,
+    /// Reflected where a ray leaves the screen.
+    pub sky: Vec3,
+}
+/// Floats in the finishing controls uniform: three vec4s, two matrices and
+/// two more vec4s.
+const CONTROLS: usize = 12 + 16 + 16 + 4 + 4;
 
 pub const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub struct PostProcess {
@@ -56,6 +71,16 @@ impl PostProcess {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -66,7 +91,7 @@ impl PostProcess {
         });
         let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Image finishing controls"),
-            contents: bytemuck::cast_slice(&[0.0f32; 12]),
+            contents: bytemuck::cast_slice(&[0.0f32; CONTROLS]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -158,9 +183,9 @@ impl PostProcess {
             cache: None,
         });
         let (color, depth, finished, upscaled) = Self::targets(device, size, display_size);
-        let group = Self::bind(device, &layout, &color, &sampler, &params);
-        let scale_group = Self::bind(device, &layout, &finished, &sampler, &params);
-        let sharpen_group = Self::bind(device, &layout, &upscaled, &sampler, &params);
+        let group = Self::bind(device, &layout, &color, &depth, &sampler, &params);
+        let scale_group = Self::bind(device, &layout, &finished, &depth, &sampler, &params);
+        let sharpen_group = Self::bind(device, &layout, &upscaled, &depth, &sampler, &params);
         Self {
             display_size,
             finished,
@@ -216,7 +241,7 @@ impl PostProcess {
             ),
             texture(
                 wgpu::TextureFormat::Depth24Plus,
-                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                 "Scene depth",
                 size,
             ),
@@ -238,6 +263,7 @@ impl PostProcess {
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
         color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         params: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
@@ -257,6 +283,10 @@ impl PostProcess {
                     binding: 2,
                     resource: params.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(depth),
+                },
             ],
         })
     }
@@ -270,6 +300,7 @@ impl PostProcess {
             device,
             &self.layout,
             &self.finished,
+            &self.depth,
             &self.sampler,
             &self.params,
         );
@@ -277,6 +308,7 @@ impl PostProcess {
             device,
             &self.layout,
             &self.upscaled,
+            &self.depth,
             &self.sampler,
             &self.params,
         );
@@ -285,6 +317,7 @@ impl PostProcess {
             device,
             &self.layout,
             &self.color,
+            &self.depth,
             &self.sampler,
             &self.params,
         );
@@ -297,8 +330,9 @@ impl PostProcess {
         output: &wgpu::TextureView,
         settings: &Settings,
         display: [u32; 2],
+        reflections: &Reflections,
     ) {
-        let params = [
+        let mut params = [
             1.0 / self.size[0] as f32,
             1.0 / self.size[1] as f32,
             settings.sharpness,
@@ -311,7 +345,13 @@ impl PostProcess {
             1.0 / display[1].max(1) as f32,
             f32::from(settings.fsr1),
             0.0,
-        ];
+        ]
+        .to_vec();
+        params.extend(reflections.view_projection.inverse().to_cols_array());
+        params.extend(reflections.view_projection.to_cols_array());
+        params.extend(reflections.eye.extend(reflections.wetness).to_array());
+        params.extend(reflections.sky.extend(0.0).to_array());
+        debug_assert_eq!(params.len(), CONTROLS);
         queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&params));
         for (target, pipeline, group, label) in [
             (
