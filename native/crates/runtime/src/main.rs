@@ -96,6 +96,16 @@ fn headlight_vertices(car: &sa_scene::vehicle::Car) -> [sa_scene::Vertex; HEADLI
     }
     out
 }
+/// Ground wetness after `dt` seconds of `rain`: soaks within a few seconds of
+/// rain starting and takes about two minutes to dry once it stops.
+fn dampen(wetness: f32, rain: f32, dt: f32) -> f32 {
+    let rain = rain.clamp(0.0, 1.0);
+    if rain > wetness {
+        (wetness + dt / 4.0).min(rain)
+    } else {
+        (wetness - dt / 120.0).max(rain)
+    }
+}
 /// Which door a ped at `offset` from a car uses: "lhs" on the driver's
 /// side, the side `Car::exit_player` tries first, otherwise "rhs".
 fn door_side(car_yaw: f32, offset: Vec3) -> &'static str {
@@ -106,7 +116,6 @@ fn door_side(car_yaw: f32, offset: Vec3) -> &'static str {
         "rhs"
     }
 }
-
 /// Corona and light-pool batches, drawn by their own additive pipelines.
 fn is_glow(batch: &GpuBatch) -> bool {
     batch.texture_key == sa_scene::lights::CORONA_KEY
@@ -132,6 +141,8 @@ struct State {
     postprocess: postprocess::PostProcess,
     camera: wgpu::Buffer,
     frustum: culling::Frustum,
+    /// The camera this frame, for screen-space reflections.
+    reflections: postprocess::Reflections,
     culling_enabled: bool,
     camera_group: wgpu::BindGroup,
     opaque: wgpu::RenderPipeline,
@@ -149,6 +160,8 @@ struct State {
     pub(crate) daycycle: daycycle::DayCycle,
     zones: zones::Zones,
     lighting: daycycle::Lighting,
+    /// How wet the outdoor ground is, 0..1. Follows rain and dries slowly.
+    wetness: f32,
     light_frustum: culling::Frustum,
     batches: Vec<GpuBatch>,
     position: Vec3,
@@ -885,6 +898,7 @@ impl State {
             postprocess,
             camera,
             frustum: culling::Frustum::default(),
+            reflections: postprocess::Reflections::default(),
             culling_enabled: true,
             camera_group,
             opaque,
@@ -902,6 +916,7 @@ impl State {
             daycycle: daycycle::DayCycle::default(),
             zones: zones::Zones::default(),
             lighting: daycycle::DayCycle::default().lighting(12.0),
+            wetness: 0.0,
             light_frustum: culling::Frustum::default(),
             batches,
             position: if let Some(ref cut) = animation {
@@ -1794,6 +1809,8 @@ impl State {
             lighting.rain = 0.0;
         }
         self.lighting = lighting;
+        self.wetness = dampen(self.wetness, lighting.rain, dt);
+        let enhanced = self.menu.settings.enhanced_lighting;
         self.queue.write_buffer(
             &self.camera,
             64,
@@ -1801,7 +1818,7 @@ impl State {
                 view_position.x,
                 view_position.y,
                 view_position.z,
-                0.0,
+                f32::from(enhanced),
                 if self.interior == 0 && self.menu.settings.atmospheric_fog {
                     1.0
                 } else {
@@ -1820,6 +1837,16 @@ impl State {
                 lighting.fog,
             ]),
         );
+        self.reflections = postprocess::Reflections {
+            view_projection: camera_matrix,
+            eye: view_position,
+            wetness: if enhanced && self.interior == 0 {
+                self.wetness
+            } else {
+                0.0
+            },
+            sky: lighting.sky,
+        };
         let light = shadow::light_matrix(self.position, lighting.sun);
         self.light_frustum = culling::Frustum::new(light);
         self.queue.write_buffer(
@@ -1832,7 +1859,14 @@ impl State {
             160,
             bytemuck::cast_slice(&[
                 lighting.sun.extend(lighting.daylight).to_array(),
-                lighting.sun_color.extend(0.0).to_array(),
+                lighting
+                    .sun_color
+                    .extend(if enhanced && self.interior == 0 {
+                        self.wetness
+                    } else {
+                        0.0
+                    })
+                    .to_array(),
                 lighting.ambient.extend(0.0).to_array(),
                 lighting.sky.extend(0.0).to_array(),
             ]),
@@ -2496,6 +2530,7 @@ impl State {
             &view,
             &self.menu.settings,
             [self.size.width, self.size.height],
+            &self.reflections,
         );
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4913,6 +4948,25 @@ fn main() -> Result<()> {
         anyhow::bail!(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod wetness_tests {
+    #[test]
+    fn ground_soaks_quickly_and_dries_slowly() {
+        let mut wet = 0.0;
+        for _ in 0..41 {
+            wet = super::dampen(wet, 1.0, 0.1);
+        }
+        assert_eq!(wet, 1.0, "about four seconds of full rain soak the ground");
+        for _ in 0..600 {
+            wet = super::dampen(wet, 0.0, 0.1);
+        }
+        assert!(wet > 0.4, "one dry minute leaves puddles, got {wet}");
+        wet = super::dampen(wet, 0.0, 120.0);
+        assert_eq!(wet, 0.0);
+        assert_eq!(super::dampen(0.2, 0.5, 0.0), 0.2);
+    }
 }
 
 #[cfg(test)]
