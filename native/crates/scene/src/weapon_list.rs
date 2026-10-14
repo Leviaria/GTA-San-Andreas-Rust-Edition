@@ -95,11 +95,18 @@ pub fn fire_and_reload(
 }
 
 pub fn original_guns(game: &Path) -> Vec<Weapon> {
-    sa_assets::game_path::resolve(game, "data/weapon.dat")
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
+    read_text(game, "data/weapon.dat")
         .map(|text| parse_weapons(&text))
         .unwrap_or_default()
+}
+
+/// A data file as text. The game's files are Latin-1, not UTF-8: weapon.dat
+/// marks melee and thrown rows with `£`, `¤` and `¶`, so a strict UTF-8 read
+/// fails on the real file and used to leave the player with no guns.
+fn read_text(game: &Path, relative: &str) -> Option<String> {
+    let path = sa_assets::game_path::resolve(game, relative).ok()?;
+    let bytes = std::fs::read(path).ok()?;
+    Some(bytes.iter().map(|&b| b as char).collect())
 }
 
 fn parse_weapons(text: &str) -> Vec<Weapon> {
@@ -149,9 +156,7 @@ fn parse_weapons(text: &str) -> Vec<Weapon> {
 /// Weapon model id to (model, texture dictionary), from the `weap` section
 /// of `data/default.ide`.
 pub fn weapon_models(game: &Path) -> std::collections::HashMap<i32, (String, String)> {
-    sa_assets::game_path::resolve(game, "data/default.ide")
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
+    read_text(game, "data/default.ide")
         .map(|text| parse_weapon_models(&text))
         .unwrap_or_default()
 }
@@ -211,6 +216,23 @@ mod tests {
         assert_eq!(models[&346], ("colt45".to_owned(), "colt45".to_owned()));
         assert_eq!(models[&356].0, "m4");
         assert!(!models.contains_key(&1));
+    }
+
+    #[test]
+    fn reads_latin1_weapon_dat_from_disk() {
+        let dir = std::env::temp_dir().join(format!("sare-weapon-dat-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        // The real file has single-byte Latin-1 markers (0xA3 is `£`),
+        // which are invalid UTF-8.
+        let mut bytes = b"\xa3 UNARMED MELEE 1.5 1.5 0 -1 0 unarmed\r\n".to_vec();
+        bytes.extend_from_slice(
+            b"$ PISTOL INSTANT_HIT 35.0 35.0 346 -1 2 colt45 17 25 0 0 0 1 0\r\n",
+        );
+        std::fs::write(dir.join("data/weapon.dat"), bytes).unwrap();
+        let guns = original_guns(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(guns.len(), 1);
+        assert_eq!(guns[0].name, "PISTOL");
     }
 
     #[test]
