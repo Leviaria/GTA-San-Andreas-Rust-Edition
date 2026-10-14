@@ -36,6 +36,8 @@ const JUNCTION: f32 = 7.0;
 const PATIENCE: f32 = 15.0;
 /// How long a car waits after the player knocks into it.
 const KNOCK_HOLD: f32 = 2.5;
+/// Seconds a burnt-out wreck stays before it is towed away.
+const WRECK_SECONDS: f32 = 45.0;
 const SPAWN_INTERVAL: f32 = 0.6;
 /// Roads this close to another player who runs traffic are theirs to fill.
 pub const TAKEN_RADIUS: f32 = 150.0;
@@ -84,6 +86,11 @@ pub struct TrafficCar {
     committed: Option<u32>,
     /// Heading towards the point the driver steers for.
     aim_yaw: f32,
+    pub damage: sa_scene::vehicle::Damage,
+    /// Metres driven, for turning the wheels.
+    travel: f32,
+    /// Seconds since this car blew up.
+    pub burnt_for: f32,
 }
 
 impl TrafficCar {
@@ -107,11 +114,25 @@ impl TrafficCar {
         Vec3::new(self.yaw.sin(), 0.0, self.yaw.cos())
     }
     /// The player ran into this car: a hard enough hit makes the driver stop
-    /// for a moment, as SA drivers do.
-    pub fn knock(&mut self, impact: f32) {
+    /// for a moment, as SA drivers do, and dents the side that was hit.
+    /// `towards` points from this car to the one that hit it.
+    pub fn knock(&mut self, impact: f32, towards: Vec3) {
         if impact > 2.0 {
             self.speed = 0.0;
             self.hold = KNOCK_HOLD;
+        }
+        self.damage
+            .crash(impact, sa_scene::vehicle::to_model(self.yaw, towards));
+    }
+    /// Wheels, steering and dents as they should be drawn.
+    pub fn look(&self) -> sa_scene::vehicle::Look {
+        let turn = self.aim_yaw - self.yaw;
+        sa_scene::vehicle::Look {
+            travel: self.travel,
+            steer: turn.sin().atan2(turn.cos()).clamp(-0.6, 0.6),
+            dents: self.damage.dents,
+            burnt: self.damage.wrecked,
+            ..Default::default()
         }
     }
 }
@@ -153,7 +174,7 @@ impl Traffic {
     ) -> Option<usize> {
         let (player, blocked, ground) = (around.player, around.blocked, &around.ground);
         self.cars
-            .retain(|car| car.position.distance(player) < DESPAWN);
+            .retain(|car| car.position.distance(player) < DESPAWN && car.burnt_for < WRECK_SECONDS);
         self.cars.truncate(limit);
         let bodies: Vec<Footprint> = self.cars.iter().map(TrafficCar::footprint).collect();
         let paths: Vec<Footprint> = self.cars.iter().map(TrafficCar::path_ahead).collect();
@@ -198,8 +219,15 @@ impl Traffic {
             } else {
                 car.waited + dt
             };
-            let obstructed = obstructed || car.hold > 0.0;
+            if car.damage.wrecked {
+                car.speed = 0.0;
+                car.burnt_for += dt;
+                continue;
+            }
+            // A driver whose car is on fire pulls up.
+            let obstructed = obstructed || car.hold > 0.0 || car.damage.burning();
             step(car, roads, ground, obstructed, dt, &mut self.seed);
+            car.travel += car.speed * dt;
         }
         self.since_spawn += dt;
         if self.cars.len() >= limit || models.is_empty() || self.since_spawn < SPAWN_INTERVAL {
@@ -243,6 +271,9 @@ impl Traffic {
             waited: 0.0,
             committed: None,
             aim_yaw: 0.0,
+            damage: Default::default(),
+            travel: 0.0,
+            burnt_for: 0.0,
         };
         place(&mut car, roads);
         settle(&mut car, roads, ground, 0.0, 0.0);
@@ -672,12 +703,9 @@ impl State {
             };
             let rotation = sa_scene::vehicle::model_rotation(car.yaw, car.pitch, car.roll);
             let offset = car.position + Vec3::Y * mesh.clearance;
+            let look = car.look();
             for batch in &mesh.batches {
-                let mut raw = batch.base.clone();
-                for v in raw.as_chunks_mut::<9>().0.iter_mut() {
-                    let p = rotation * Vec3::new(v[0], v[1], v[2]) + offset;
-                    v[..3].copy_from_slice(&p.to_array());
-                }
+                let raw = crate::car_damage::pose_car(batch, &look, rotation, offset);
                 self.queue
                     .write_buffer(&batch.buffer, 0, bytemuck::cast_slice(&raw));
             }
@@ -1011,11 +1039,38 @@ mod tests {
     }
 
     #[test]
+    fn a_wreck_stands_still_and_is_towed_away_later() {
+        let roads = road();
+        let mut traffic = Traffic::default();
+        fill(&mut traffic, &roads, Vec3::ZERO);
+        let id = traffic.cars[0].id;
+        traffic.cars[0].damage.hurt(5000.0);
+        assert!(traffic.cars[0].damage.update(0.1), "blows up");
+        let at = traffic.cars[0].position;
+        let around = Surroundings {
+            player: Vec3::ZERO,
+            blocked: &[],
+            ground: |_, _| None,
+            taken: &[],
+        };
+        for _ in 0..20 {
+            traffic.update(&roads, &around, &[3], 4, 0.1);
+        }
+        let wreck = traffic.cars.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(wreck.position, at);
+        assert!(wreck.look().burnt);
+        for _ in 0..500 {
+            traffic.update(&roads, &around, &[3], 4, 0.1);
+        }
+        assert!(traffic.cars.iter().all(|c| c.id != id), "towed away");
+    }
+
+    #[test]
     fn a_hard_knock_makes_the_driver_wait() {
         let roads = road();
         let mut traffic = Traffic::default();
         fill(&mut traffic, &roads, Vec3::ZERO);
-        traffic.cars[0].knock(8.0);
+        traffic.cars[0].knock(8.0, Vec3::Z);
         for _ in 0..10 {
             traffic.update(
                 &roads,

@@ -443,6 +443,7 @@ impl Ped {
             triangles,
             animation: None,
             collision: None,
+            vehicle_pieces: Default::default(),
         })
     }
 }

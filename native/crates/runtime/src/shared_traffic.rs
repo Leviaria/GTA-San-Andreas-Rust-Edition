@@ -194,11 +194,7 @@ impl State {
             let rotation = sa_scene::vehicle::model_rotation(car.yaw, car.pitch, car.roll);
             let offset = car.position + Vec3::Y * car.clearance;
             for batch in &car.batches {
-                let mut raw = batch.base.clone();
-                for v in raw.as_chunks_mut::<9>().0.iter_mut() {
-                    let p = rotation * Vec3::new(v[0], v[1], v[2]) + offset;
-                    v[..3].copy_from_slice(&p.to_array());
-                }
+                let raw = crate::car_damage::pose_car(batch, &Default::default(), rotation, offset);
                 self.queue
                     .write_buffer(&batch.buffer, 0, bytemuck::cast_slice(&raw));
             }

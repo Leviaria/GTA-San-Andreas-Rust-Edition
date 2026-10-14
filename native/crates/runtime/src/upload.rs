@@ -230,6 +230,7 @@ impl Upload {
                         } else {
                             Vec::new()
                         },
+                        piece: None,
                     });
                 }
             }
