@@ -1,7 +1,7 @@
 //! Ambient city traffic along the game's own car paths (`nodes*.dat`).
 //!
 //! Traffic cars do not run the full vehicle physics: each one steers along
-//! the right-hand lane of the road graph towards a point a little ahead, so
+//! its lane of the road graph towards a point a little ahead, so
 //! it rounds corners in smooth arcs, sits on the real road surface, leans
 //! into turns and dips under braking. Every driver has their own pace, slows
 //! for turns and stops behind anything in front of it. Cars appear out of the
@@ -13,8 +13,9 @@ use crate::streaming::ORIGIN;
 use glam::Vec3;
 use sa_scene::roads::RoadGraph;
 
-/// Offset from the road centre line to the middle of the right-hand lane.
-const LANE: f32 = 2.4;
+/// Half the width of a lane, as in SA (5.4 m lanes): the middle of the
+/// first right-hand lane of a two-way road is this far off the centre line.
+const LANE: f32 = 2.7;
 const CRUISE: f32 = 13.0;
 /// Tightest turn a traffic car takes, in metres.
 const TURN_RADIUS: f32 = 4.5;
@@ -66,6 +67,11 @@ pub struct TrafficCar {
     to: u32,
     /// The link after this one, picked early so the car can turn into it.
     next: u32,
+    /// Which lane the driver keeps to, counted from the inside lane; on a
+    /// road with fewer lanes the car takes the outermost one there is.
+    lane: u8,
+    /// No legal way on (the end of a one-way road): retired next update.
+    stranded: bool,
     /// Metres travelled along the current link.
     along: f32,
     pub speed: f32,
@@ -173,8 +179,11 @@ impl Traffic {
         dt: f32,
     ) -> Option<usize> {
         let (player, blocked, ground) = (around.player, around.blocked, &around.ground);
-        self.cars
-            .retain(|car| car.position.distance(player) < DESPAWN && car.burnt_for < WRECK_SECONDS);
+        self.cars.retain(|car| {
+            car.position.distance(player) < DESPAWN
+                && car.burnt_for < WRECK_SECONDS
+                && !car.stranded
+        });
         self.cars.truncate(limit);
         let bodies: Vec<Footprint> = self.cars.iter().map(TrafficCar::footprint).collect();
         let paths: Vec<Footprint> = self.cars.iter().map(TrafficCar::path_ahead).collect();
@@ -247,10 +256,15 @@ impl Traffic {
             return None;
         }
         let from = candidates[self.random() as usize % candidates.len()];
-        let next = roads.neighbours(from);
-        let to = next[self.random() as usize % next.len()];
+        // Only ever down a one-way road in its own direction.
+        let exits: Vec<u32> = roads.exits(from).collect();
+        if exits.is_empty() {
+            return None;
+        }
+        let to = exits[self.random() as usize % exits.len()];
+        let lane = (self.random() % roads.lanes(from, to).max(1) as u32) as u8;
         let catalog = models[self.random() as usize % models.len()];
-        let next = pick_next(roads, from, to, &mut self.seed);
+        let next = pick_next(roads, from, to, &mut self.seed)?;
         let cruise = CRUISE * (0.8 + (self.random() % 1000) as f32 / 1000.0 * 0.35);
         self.next_id += 1;
         let mut car = TrafficCar {
@@ -259,6 +273,8 @@ impl Traffic {
             from,
             to,
             next,
+            lane,
+            stranded: false,
             along: 0.0,
             speed: cruise * 0.6,
             cruise,
@@ -307,28 +323,40 @@ struct Junction {
 fn junction(car: &TrafficCar, roads: &RoadGraph) -> Junction {
     let stopping = car.speed * car.speed / (2.0 * BRAKING);
     let reach = JUNCTION + stopping + 2.0;
-    // A plain bend has two neighbours; anything else is a crossing or a
-    // dead end where cars turn across each other. Look past bends so a car
-    // starts braking in time even when the junction is a link or two away.
+    // Look past bends so a car starts braking in time even when the
+    // junction is a link or two away.
     let (mut previous, mut node) = (car.from, car.to);
     let mut distance = length_of(roads, car.from, car.to) - car.along;
-    while roads.neighbours(node).len() == 2 && distance < reach {
-        let next = roads
-            .neighbours(node)
-            .iter()
-            .copied()
-            .find(|&n| n != previous);
-        let Some(next) = next else { break };
+    while !cross_traffic(roads, previous, node) && distance < reach {
+        let mut ways = roads.exits(node).filter(|&n| n != previous);
+        let (Some(next), None) = (ways.next(), ways.next()) else {
+            break;
+        };
         distance += length_of(roads, node, next);
         (previous, node) = (node, next);
     }
-    let found = roads.neighbours(node).len() != 2;
+    let found = cross_traffic(roads, previous, node);
     Junction {
         node: found.then_some(node),
         at: world(roads, node),
         distance,
         approaching: found && distance < reach,
     }
+}
+
+/// Whether a car coming from `from` meets cross traffic at `node`: other
+/// roads lead in and the car has a choice of ways on (a crossing or a
+/// T-junction), or two other roads lead in. A plain bend, a motorway exit
+/// and a slip road joining a motorway are not crossings; there cars only
+/// keep their distance to the car ahead.
+fn cross_traffic(roads: &RoadGraph, from: u32, node: u32) -> bool {
+    let others = roads.neighbours(node).iter().filter(|&&n| n != from);
+    let inbound = others
+        .clone()
+        .filter(|&&n| roads.lanes(n, node) > 0)
+        .count();
+    let outbound = others.filter(|&&n| roads.lanes(node, n) > 0).count();
+    inbound >= 2 || (inbound == 1 && outbound >= 2)
 }
 
 /// Junctions take one car at a time, like a four-way stop: a car waits while
@@ -364,26 +392,33 @@ fn gives_way(me: usize, other: usize, cars: &[TrafficCar], junctions: &[Junction
         })
 }
 
-fn pick_next(roads: &RoadGraph, from: u32, to: u32, seed: &mut u32) -> u32 {
-    let options: Vec<u32> = roads
-        .neighbours(to)
-        .iter()
-        .copied()
-        .filter(|&n| n != from)
-        .collect();
+/// The link to take after `from` -> `to`, never the wrong way down a
+/// one-way road. None when there is no legal way on.
+fn pick_next(roads: &RoadGraph, from: u32, to: u32, seed: &mut u32) -> Option<u32> {
+    let options: Vec<u32> = roads.exits(to).filter(|&n| n != from).collect();
     if options.is_empty() {
-        from // Dead end: turn around.
+        // Dead end: turn around, where the road runs both ways.
+        (roads.lanes(to, from) > 0).then_some(from)
     } else {
         *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        options[(*seed >> 8) as usize % options.len()]
+        Some(options[(*seed >> 8) as usize % options.len()])
     }
 }
 
-/// Start and end of the right-hand lane of a link.
-fn lane(roads: &RoadGraph, from: u32, to: u32) -> (Vec3, Vec3) {
+/// Start and end of lane `wanted` of a link. Two-way roads keep their lanes
+/// right of the centre line; a one-way road (a motorway carriageway) is
+/// centred on its path line with its lanes side by side, as in SA.
+fn lane(roads: &RoadGraph, from: u32, to: u32, wanted: u8) -> (Vec3, Vec3) {
     let (a, b) = (world(roads, from), world(roads, to));
     let flat = Vec3::new(b.x - a.x, 0.0, b.z - a.z).normalize_or_zero();
-    let right = Vec3::new(-flat.z, 0.0, flat.x) * LANE;
+    let lanes = roads.lanes(from, to).max(1);
+    let index = wanted.min(lanes - 1) as f32;
+    let offset = if roads.lanes(to, from) == 0 {
+        (index - (lanes - 1) as f32 / 2.0) * 2.0 * LANE
+    } else {
+        (index * 2.0 + 1.0) * LANE
+    };
+    let right = Vec3::new(-flat.z, 0.0, flat.x) * offset;
     (a + right, b + right)
 }
 
@@ -427,9 +462,9 @@ fn step(
     dt: f32,
     seed: &mut u32,
 ) {
-    let current = lane(roads, car.from, car.to);
+    let current = lane(roads, car.from, car.to, car.lane);
     let length = flat_length(current.0, current.1);
-    let following = lane(roads, car.to, car.next);
+    let following = lane(roads, car.to, car.next, car.lane);
     let here = (current.1 - current.0).normalize_or_zero();
     let there = (following.1 - following.0).normalize_or_zero();
     let u_turn = car.next == car.from;
@@ -482,8 +517,11 @@ fn step(
         let u_turn = car.next == car.from;
         car.from = car.to;
         car.to = car.next;
-        car.next = pick_next(roads, car.from, car.to, seed);
-        car.along = progress(car.position, lane(roads, car.from, car.to));
+        car.next = pick_next(roads, car.from, car.to, seed).unwrap_or_else(|| {
+            car.stranded = true;
+            car.from
+        });
+        car.along = progress(car.position, lane(roads, car.from, car.to, car.lane));
         if u_turn {
             // No room to swing round: drop into the other lane.
             car.along = car.along.max(0.0);
@@ -491,7 +529,7 @@ fn step(
         }
     }
     // A car knocked or squeezed far off its lane rejoins it.
-    let (start, end) = lane(roads, car.from, car.to);
+    let (start, end) = lane(roads, car.from, car.to, car.lane);
     let on_lane = start + (end - start).normalize_or_zero() * car.along.max(0.0);
     if Vec3::new(car.position.x - on_lane.x, 0.0, car.position.z - on_lane.z).length() > 12.0 {
         place(car, roads);
@@ -569,7 +607,7 @@ fn length_of(roads: &RoadGraph, from: u32, to: u32) -> f32 {
 
 /// Put a car on its lane at its distance along the link, facing down it.
 fn place(car: &mut TrafficCar, roads: &RoadGraph) {
-    let (start, end) = lane(roads, car.from, car.to);
+    let (start, end) = lane(roads, car.from, car.to, car.lane);
     let flat = Vec3::new(end.x - start.x, 0.0, end.z - start.z).normalize_or_zero();
     car.position = start + flat * car.along;
     if flat != Vec3::ZERO {
@@ -780,6 +818,107 @@ mod tests {
         let forward = Vec3::new(car.yaw.sin(), 0.0, car.yaw.cos());
         let right = Vec3::new(-forward.z, 0.0, forward.x);
         assert!((car.position.x - right.x * LANE).abs() < 1e-3);
+    }
+
+    /// A motorway: two one-way carriageways of two lanes, 30 m apart, the
+    /// western one (nodes 0..40) running north and the eastern one south.
+    fn motorway() -> RoadGraph {
+        let o = ORIGIN;
+        let mut nodes = Vec::new();
+        let mut links = Vec::new();
+        for side in 0..2u32 {
+            for i in 0..40u32 {
+                nodes.push([
+                    o[0] - 15.0 + side as f32 * 30.0,
+                    o[1] - 200.0 + i as f32 * 10.0,
+                    10.0,
+                ]);
+                let mut l = Vec::new();
+                if i > 0 {
+                    l.push(side * 40 + i - 1);
+                }
+                if i < 39 {
+                    l.push(side * 40 + i + 1);
+                }
+                links.push(l);
+            }
+        }
+        let mut roads = RoadGraph::from_parts(nodes, links);
+        for i in 0..39u32 {
+            roads.set_lanes(i, i + 1, 2);
+            roads.set_lanes(i + 1, i, 0);
+            roads.set_lanes(40 + i + 1, 40 + i, 2);
+            roads.set_lanes(40 + i, 40 + i + 1, 0);
+        }
+        roads
+    }
+
+    #[test]
+    fn motorway_traffic_only_drives_its_own_carriageway_way() {
+        let roads = motorway();
+        let mut traffic = Traffic::default();
+        let mut seen = 0;
+        for _ in 0..600 {
+            traffic.update(
+                &roads,
+                &Surroundings {
+                    player: Vec3::ZERO,
+                    blocked: &[],
+                    ground: |_, _| None,
+                    taken: &[],
+                },
+                &[3],
+                6,
+                0.1,
+            );
+            for car in &traffic.cars {
+                assert!(
+                    roads.lanes(car.from, car.to) > 0,
+                    "wrong way down a carriageway"
+                );
+                let west = car.from < 40;
+                // North is -Z: the western carriageway heads that way.
+                let heading = if west { -1.0 } else { 1.0 };
+                assert!(car.forward().z * heading > 0.9, "car facing the wrong way");
+                // Both lanes sit on the carriageway, either side of its line.
+                let line = if west { -15.0 } else { 15.0 };
+                let off = (car.position.x - line).abs();
+                assert!((off - LANE).abs() < 0.5, "car off its lane: {off}");
+                seen += 1;
+            }
+        }
+        assert!(seen > 0);
+        assert!(traffic.cars.iter().any(|c| c.speed > 5.0));
+    }
+
+    #[test]
+    fn a_slip_road_joining_is_no_crossing_but_a_road_junction_is() {
+        // Motorway 0 -> 1 -> 2 with a slip road 3 -> 1 joining it.
+        let mut roads = RoadGraph::from_parts(
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 50.0, 0.0],
+                [0.0, 100.0, 0.0],
+                [20.0, 0.0, 0.0],
+            ],
+            vec![vec![1], vec![0, 2, 3], vec![1], vec![1]],
+        );
+        for (from, to) in [(1, 0), (2, 1), (1, 3)] {
+            roads.set_lanes(from, to, 0);
+        }
+        assert!(!cross_traffic(&roads, 0, 1));
+        assert!(!cross_traffic(&roads, 3, 1));
+        // The same shape with two-way roads is a T-junction.
+        let roads = RoadGraph::from_parts(
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.0, 50.0, 0.0],
+                [0.0, 100.0, 0.0],
+                [20.0, 0.0, 0.0],
+            ],
+            vec![vec![1], vec![0, 2, 3], vec![1], vec![1]],
+        );
+        assert!(cross_traffic(&roads, 0, 1));
     }
 
     #[test]
