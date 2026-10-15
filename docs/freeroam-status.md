@@ -1,7 +1,7 @@
-# Native freeroam – arbeidsstatus 8. oktober 2026
+# Native Freeroam — Development Status, October 8, 2026
 
-Målet er freeroam på originalkartet med lokale custom ressurser. Missions er
-ikke prioritert. Originalinstallasjonen leses; gta_sa.exe kjøres ikke.
+The goal is freeroam on the original map with local custom resources. Missions
+are not a priority. The original installation is read; gta_sa.exe is not run.
 
 Custom vehicle resources can supply bounded native handling values for engine,
 brakes, grip, steering and suspension. Server packs include this tuning and
@@ -13,275 +13,306 @@ Native `sa-launcher` now provides installation validation, offline start/Continu
 relay browser/join codes, favorites, shared settings, log/report access and safe
 unused-cache cleanup. Runtime remains independently launchable. See [launcher](launcher.md).
 
-## Lokal lagring
+## Local saves
 
-Offline-posisjon, kamera, bilvalg, ped og antrekk lagres når du åpner en meny,
-hvert 60. sekund ved trygg posisjon, ved normal avslutning og før multiplayer. Hovedmenyen viser
-«Continue free roam» når et gyldig checkpoint er lastet. Neste oppstart laster
-området rundt posisjonen og sjekker gulv, vegger og hodeplass før gjenopptak.
-Hvis stedet mangler trygg grunn, starter du ved Grove Street. Fjernede eller
-flertydige modellnavn bruker dagens standardvalg; klesvalg gjelder bare samme ped.
+The offline position, camera, selected car, ped and outfit are saved when you
+open a menu, every 60 seconds at a safe position, on normal exit and before
+multiplayer. The main menu shows “Continue free roam” when a valid checkpoint
+has been loaded. On the next launch, the area around that position is loaded
+and checked for floor, wall and head clearance before resuming.
+If the location has no safe ground, you start at Grove Street. Removed or
+ambiguous model names fall back to the current defaults; clothing selections
+only apply to the same ped.
 
-Dette lagrer én lokal offline-økt, uten missions eller serverfremdrift. Du
-starter til fots, og valgt bil plasseres i ledig rom i nærheten; fart og nøyaktig
-parkering lagres ikke. Innendørs, flykamera, hopp, streaming og multiplayer
-overskriver ikke det siste trygge checkpointet. Et krasj kan miste fremdrift siden siste trygge lagring. Se [lagring og testing](progress.md).
+This saves one local offline session, without missions or server progress.
+You start on foot, and the selected car is placed in a clear space nearby;
+speed and exact parking position are not saved. Interiors, free-fly camera
+mode, jumping, streaming and multiplayer do not overwrite the last safe
+checkpoint. A crash can lose progress since the last safe save. See
+[saving and testing](progress.md).
 
-## Multiplayer-prototype
+## Multiplayer prototype
 
-En spiller hoster, og opptil 19 andre kobler til med IP og port. Åpne Multiplayer
-fra hoved-/pausemenyen, F5 eller /mp. Spillerposisjoner og bilbevegelse deles;
-valgte biler, peds og opptil 16 klesvalg per ped synkroniseres også fra
-sesjonens felles ressursliste. Personlige biler vises også etter utstigning,
-med separat synlighet for bilen og eieren. Passasjerplasser reserveres av hosten: G ber om plass i en annen spillers
-bil, og F går ut igjen. NPC-er, bilbytte og felles bilkollisjoner er ikke synkronisert.
-Se [oppsett og begrensninger](multiplayer.md). Direkte internett-hosting krever
-videresendt TCP-port (standard 7777); automatisk NAT-traversering er ikke lagt inn.
-Relay-modus har serverbrowser, offentlige/private rom og joincode. Begge parter
-kobler ut til en tilgjengelig relay, uten portåpning på spillverten. Start relayen
-med `start-relay.cmd`; ingen offentlig tjeneste er satt opp. Prototypen bruker
-ukryptert TCP og bør testes på betrodd LAN/VPN. Native servermods lastes ned og caches før tilkobling, med versjonssjekk
-og gjenoppretting av lokale ressurser etter frakobling. Se [veikartet](roadmap.md) for neste milepæl og cache.
+One player hosts, and up to 19 others connect using an IP address and port.
+Open Multiplayer from the main/pause menu, F5 or /mp. Player positions and
+vehicle movement are shared; selected cars, peds and up to 16 clothing
+selections per ped are also synchronized from the session's shared resource
+list. Personal cars remain visible after the driver exits, with separate
+visibility for the car and its owner. Passenger seats are reserved by the
+host: G requests a seat in another player's car, and F exits again. NPCs,
+switching cars and shared vehicle collisions are not synchronized.
+See [setup and limitations](multiplayer.md). Direct internet hosting requires
+a forwarded TCP port (7777 by default); automatic NAT traversal is not
+implemented. Relay mode provides a server browser, public/private rooms and
+join codes. Both sides connect outbound to a reachable relay, without port
+forwarding on the game host. Start the relay with `start-relay.cmd`; no public
+service is configured. The prototype uses unencrypted TCP and should be tested
+on a trusted LAN/VPN. Native server mods are downloaded and cached before
+joining, with version checks and restoration of local resources after
+disconnecting. See the [roadmap](roadmap.md) for the next milestone and caching.
 
-## Start og kontroller
+## Startup and controls
 
-Dobbeltklikk `start-sare.cmd`, velg installasjonen og trykk Play i launcheren.
-Utviklere bygger først med `cargo build --release --workspace --manifest-path native/Cargo.toml`.
-Direkte oppstart støttes også via `native/target/release/sa-runtime.exe`.
+Double-click `start-sare.cmd`, select the installation and press Play in the launcher.
+Developers first build with `cargo build --release --workspace --manifest-path native/Cargo.toml`.
+Direct startup is also supported through `native/target/release/sa-runtime.exe`.
 
-- WASD: gå. Shift: løp. Space: hopp. Klikk i vinduet for musestyring.
-- Xbox-kontroller (standardmapping): venstre stikke går/styrer, høyre stikke ser rundt;
-  A hopper/bekrefter, X løper, Y går inn/ut av bil, RT gasser, LT bremser/rygger,
-  LB håndbrems. Start åpner pause, View/Back åpner kart, D-pad navigerer og B går tilbake.
-  Kontrolleren kan kobles til mens runtime kjører; tastatur/mus virker fortsatt samtidig.
-  Ingen vibrasjon eller bindingstilpasning ennå.
-- I dypt vann: WASD beveger i overflaten, Space gir et løft.
-- P: gåmodus/flykamera. Q/E: ned/opp i flykamera. Esc: pausemeny.
-- M: kartmeny. Mus, piltaster/Enter eller Xbox D-pad/A brukes i menyene.
-- /cars eller F7: velg og spawn bil. /peds eller F4: bytt spillerfigur. T: chat. F8: konsoll.
-  /mods viser ressurslisten, med serverens liste mens du er tilkoblet.
-  Trykk /, skriv kommandoen og Enter. Menyene finnes ogsaa i pausemenyen.
-  Velg Spawn nearby eller S i peds-menyen for en figur i verden (maks aatte),
-  med idle-animasjon uten kamp-/gang-AI.
-- F9: hent valgt bil foran deg og sett deg inn. F: gå ut / inn nær bilen.
-- I bil: W/S gass og brems/rygging, A/D styring, Space håndbrems.
-- R: last Grove Street og gå tilbake dit.
-- 1: Grove Street; 2: Los Santos sentrum; 3: Santa Maria-stranden.
-- 4: LS flyplass; 5: landsbygda; 6: San Fierro.
-- 7: Las Venturas; 8: ørkenen; 9: Mount Chiliad.
+- WASD: walk. Shift: run. Space: jump. Click inside the window to enable mouse control.
+- Xbox controller (default mapping): left stick moves/steers, right stick looks around;
+  A jumps/confirms, X runs, Y enters/exits a car, RT accelerates, LT brakes/reverses,
+  LB applies the handbrake. Start opens the pause menu, View/Back opens the map,
+  the D-pad navigates and B goes back.
+  The controller can be connected while the runtime is running; keyboard and mouse
+  continue to work at the same time. No vibration or custom bindings yet.
+- In deep water: WASD moves along the surface, Space gives an upward boost.
+- P: walking mode/free-fly camera. Q/E: down/up in free-fly mode. Esc: pause menu.
+- M: map menu. Use the mouse, arrow keys/Enter or Xbox D-pad/A in menus.
+- /cars or F7: select and spawn a car. /peds or F4: change the player character.
+  T: chat. F8: console.
+  /mods shows the resource list, using the server's list while connected.
+  Press /, type the command and press Enter. These menus are also available
+  from the pause menu.
+  Choose Spawn nearby or S in the peds menu to place a character in the world
+  (up to eight), with an idle animation and no combat/walking AI.
+- F9: spawn the selected car in front of you and get in. F: exit / enter near the car.
+- In a car: W/S accelerate and brake/reverse, A/D steer, Space applies the handbrake.
+- R: load Grove Street and return there.
+- 1: Grove Street; 2: downtown Los Santos; 3: Santa Maria Beach.
+- 4: LS airport; 5: countryside; 6: San Fierro.
+- 7: Las Venturas; 8: desert; 9: Mount Chiliad.
 
-Området lastes ferdig før teleport. Et bakgrunnsarbeid laster neste nabolag
-etter omtrent 140 meter. Gjeldende område beholdes mens dette pågår.
-Bevegelse stoppes ved sikkerhetsgrensen dersom lasting ikke har rukket å bli
-ferdig. Vindustittelen viser FPS, GTA-koordinater, modus og lasting.
-Mislykket kartlasting beholder området og venter fem sekunder før nytt
-forsøk. Hvis bakgrunnslasteren stopper, frigjøres lasteindikatoren og
-feilmelding vises i menyen.
+The area finishes loading before teleporting. A background task loads the next
+neighborhood after approximately 140 meters. The current area is retained
+while this happens. Movement is stopped at the safety boundary if loading has
+not finished in time. The window title shows FPS, GTA coordinates, mode and
+loading status. Failed map loads retain the current area and wait five seconds
+before retrying. If the background loader stops, the loading indicator is
+cleared and an error message appears in the menu.
 
-## Implementert
+## Implemented
 
-- Original 2DFX-skilttekst lastes fra DFF-filene og tegnes med `roadsignfont`
-  fra installasjonens `models/particle.txd`. Linjer, farger, piler og symboler
-  beholdes. Alle synlige tegn deler én tekstur og tegnegruppe og inngår ikke i
-  kollisjonskartet. Originalinstallasjonen ga 489 tekstfelt i 207 modeller;
-  Vulkan-testen bekrefter lesbar tekst ved broen nær Grove Street. Dette dekker
-  dynamisk skilttekst; andre manglende bygningsteksturer må undersøkes separat.
-  `--smoke-signs --capture-dir <mappe>` tar et testbilde av et nærliggende skilt.
-- Originale RenderWare-teksturanimasjoner brukes på rullende skilt, neonskilt
-  og fossefall. 21 spor indekseres én gang ved oppstart; grunngeometri og
-  kollisjoner beholdes mens de animerte materialenes UV-er oppdateres.
-  Animasjonsdata følger også kartet gjennom bakgrunnslasting og GPU-opplasting.
-  Første UV-kanal støttes; full MatFX/dual-texture-belysning og tidsstyrte
-  dag-/nattobjekter er fortsatt ikke implementert.
-  `--smoke-neon --capture-dir <mappe>` tester det rullende Las Venturas-skiltet.
-  Formatgrunnlag: [original skiltkode](https://github.com/gta-reversed/gta-reversed/blob/master/source/game_sa/CustomRoadsignMgr.cpp)
-  og [RenderWare UV-animasjoner](https://github.com/aap/librw/blob/master/src/uvanim.cpp).
+- Original 2DFX sign text is loaded from DFF files and drawn using `roadsignfont`
+  from the installation's `models/particle.txd`. Lines, colors, arrows and symbols
+  are preserved. All visible characters share one texture and draw batch and
+  are excluded from the collision map. The original installation yielded
+  489 text fields across 207 models; the Vulkan test confirms readable text
+  at the bridge near Grove Street. This covers dynamic sign text; other
+  missing building textures need to be investigated separately.
+  `--smoke-signs --capture-dir <directory>` captures a test image of a nearby sign.
+- Original RenderWare texture animations are used on scrolling signs, neon
+  signs and waterfalls. 21 tracks are indexed once at startup; base
+  geometry and collisions are retained while the animated materials' UVs
+  are updated. Animation data also follows the map through background loading
+  and GPU upload.
+  The first UV channel is supported; full MatFX/dual-texture lighting and
+  timed day/night objects are still not implemented.
+  `--smoke-neon --capture-dir <directory>` tests the scrolling Las Venturas sign.
+  Format references: [original sign code](https://github.com/gta-reversed/gta-reversed/blob/master/source/game_sa/CustomRoadsignMgr.cpp)
+  and [RenderWare UV animations](https://github.com/aap/librw/blob/master/src/uvanim.cpp).
 
-- Hovedmeny inspirert av San Andreas, tilpasset freeroam, med verden som bakgrunn.
-- Pause, kart med ni reisemål, innstillinger, kontroller og lokal mod-oversikt
-  med synlig status for aktive og deaktiverte ressurser.
-- Innstillinger for synsfelt, mus, fullskjerm, VSync, HUD, radar/minikart,
-  speedometer, kjøreegenskaper og flyfart lagres i
-  `%LOCALAPPDATA%/SAFreeroam/settings.json`. Menyer stopper spillerbevegelsen.
-- Radar/minikartet bruker de originale radarflisene (`radar00.txd` til
-  `radar143.txd` i `gta3.img`), plassert etter San Andreas-verdenskoordinater.
-  Som i GTA V er det et rektangel nede til venstre som roterer med kameraet,
-  har spilleren lavt i bildet og zoomer ut med farten. Blips utenfor
-  rekkevidde ligger på kanten. Hvis originalfilen mangler, vises ikke et
-  oppdiktet kart.
-- Pausekartet (M) er som i GTA V: dra eller WASD for å flytte, scroll eller
-  PgUp/PgDn for å zoome, legend til høyre, reisemål til venstre. Høyreklikk
-  setter og fjerner et waypoint, C finner deg igjen og Backspace fjerner
-  waypointet. GPS-linjen følger bilveiene fra spillets `nodes*.dat` og finner
-  ny vei etter feil sving; uten dem er den en rett linje. Speedometeret
-  vises når spilleren kjører bil. Begge kan slås av hver for seg i innstillingene.
-- Tap av vindusfokus åpner pausemenyen. Kartmenyen støtter også tallene 1–9.
-- `--smoke-menus` rendrer menysidene og kan lagre renderbilder.
+- A main menu inspired by San Andreas, adapted for freeroam, with the world as its background.
+- Pause, a map with nine destinations, settings, controls and a local mod overview
+  showing the status of enabled and disabled resources.
+- Settings for field of view, mouse, fullscreen, VSync, HUD, radar/minimap,
+  speedometer, vehicle handling and flight speed are saved in
+  `%LOCALAPPDATA%/SAFreeroam/settings.json`. Menus stop player movement.
+- The radar/minimap uses the original radar tiles (`radar00.txd` through
+  `radar143.txd` in `gta3.img`), positioned using San Andreas world coordinates.
+  As in GTA V, it is a rectangle in the lower-left corner that rotates with
+  the camera, keeps the player near the bottom and zooms out with speed.
+  Out-of-range blips sit on the edge. If the original file is missing, no
+  fabricated map is displayed.
+- The pause map (M) works like GTA V's: drag or use WASD to pan, scroll or
+  PgUp/PgDn to zoom, with the legend on the right and destinations on the left.
+  Right-click sets and removes a waypoint, C centers on you again and Backspace
+  clears the waypoint. The GPS line follows vehicle roads from the game's
+  `nodes*.dat` files and reroutes after a wrong turn; without them, it is a
+  straight line. The speedometer appears while the player is driving.
+  Both can be disabled separately in the settings.
+- Losing window focus opens the pause menu. The map menu also supports keys 1–9.
+- `--smoke-menus` renders the menu pages and can save rendered images.
 
-- Indeksering av 44 771 utendørsplasseringer på denne installasjonen.
-- Rettet IPL-feil: bare de nederste åtte bitene er interiør-ID. Flaggene over
-  disse bitene skal ikke føre til at utendørsterreng forkastes.
-- Faktiske transformerte modellgrenser brukes i nabolagsutvalget.
-- Objekter fra IDE `anim` tas med som statisk geometri. Bevegelsen deres
-  er fortsatt ikke implementert.
-- IDE `txdp` kobler teksturordbøker til foreldre. Barnets teksturer har
-  prioritet; sirkler og for lange kjeder avbrytes. Ordlistene mellomlagres
-  under én områdelast med 64 MiB grense.
-- Original `water.dat` leses som trekanter/firkanter, med synlighetsflagg
-  og høydeinterpolering. Vann rendres med original `waterclear256` fra
-  lokal `particle.txd`; geometrien inngår ikke i vanlig gulvkollisjon.
-- Enkel flyting og overflatebevegelse hindrer synking til havbunnen.
-  Dette er foreløpig uten bølger, dykking eller svømmeanimasjon.
-- `--probe-water` kontrollerer flyting med original kystgeometri.
-- Foreldre angitt via IPL LOD-lenker filtreres bort fra detaljvisningen.
-- Fjern-LOD vises opptil 2,5 km. En IPL-LOD-gruppe vises enten helt i
-  detalj eller som LOD-modellen, aldri halvt; tidligere ga dette en ring med
-  hull i bakken i kanten av detaljområdet. Fjernmodellene inngår aldri i
-  gangkollisjon. Kameraets fjernplan er 3,5 km.
-- Objekter med interiør-ID 13 («synlig overalt») vises nå utendørs. Det gjelder
-  284 plasseringer, blant annet veier, trafikklys og LOD-bygninger i sentrum av
-  Los Santos, som tidligere manglet og etterlot et stort hull.
-- `--smoke-view eyeX,eyeY,eyeZ,målX,målY,målZ --capture-dir <mappe>` tar et
-  bilde fra et fast kamera i startområdet, for å kontrollere kartet.
-- Et område som når geometribudsjettet (30 000 plasseringer / 4 mill. trekanter)
-  lastes likevel: nærmeste detaljer først, fjerneste kulisser utelates.
-- Neste område sentreres foran en bil i fart (inntil 120 m), slik at bilen
-  ikke når kanten av det gamle området før det nye er klart.
-- Originale COL1/2/3/4-kollisjonscontainere dekodes. 8 255 originalmodeller
-  ble indeksert. Trekanter brukes direkte; bokser og kuler trianguleres.
-- Visuell kollisjon brukes som reserve for modeller uten COL.
-- Førstepersons gåmodus starter automatisk. Gjenoppretting ved fall langt
-  under kartet. P beholder flymodus for utforskning og feilsøking.
-- Native mods: DFF, TXD, PNG, valgfri COL, plasseringer og modell-erstatning.
-- DFF med innledende UV-animasjonsordbok leses med støttet UV-animasjon.
-  Ugyldige UV-koordinater får reserveverdi; romlige data avvises ved feil.
-  Metadata-audit dekodet 12 955 av 12 955 DFF-er fra lokal `gta3.img`.
-  Denne metadata-auditen beviser geometrilesing, ikke alle materialeffekter.
-- GPU-opplasting beholder ikke CPU-kopier av statisk, ikke-animert geometri.
-- Nabolagsstreaming gjenbruker GPU-teksturer fra det aktive området når samme
-  uendrede ressursloader fortsatt brukes. Server-/modbytte får egne opplastinger,
-  slik at like teksturnavn med ulike bilder ikke blandes. CPU-bilder frigjøres
-  gradvis innenfor opplastingens tidsbudsjett.
-  Før/etter-test på RTX 3070/Vulkan langs samme 1,2 km-rute med sju områdeskifter
-  reduserte samlet opplasting fra 2871,6 til 871,5 MiB (omtrent 70 prosent).
-  Antall opplastingsframes gikk fra 1100 til 417. Dette måler redusert arbeid,
-  ikke en garantert FPS eller fravær av alle driver-/lastingshakk.
-- Én aktiv kjørbar bil, valgt fra bilmenyens originale og custom modeller,
-  med følgekamera, terrengkontakt, veggkollisjon og inn/ut.
-  `--smoke-car` kontrollerer kjøring, bremsing, utstigning og ny innstigning.
-  Bilens dynamiske geometri beholdes når nabolag byttes.
-  Parkerings- og pauseframes gjenbruker nå bilens GPU-geometri til den flytter
-  eller roterer; modell- og sesjonsbytte tvinger ny oppdatering. Skyline-testen
-  gikk fra 54,01 MiB til 0 MiB med gjentatte bilmesh-opplastinger over 30
-  parkerte frames. Dette måler fjernet arbeid, ikke en bestemt FPS-økning.
-- Bakkekontakt måles fra hvert hjuls forventede høyde på den skrå bilen.
-  Fjæringen følger også veiens høydeendring under kjøring, slik at den lave
-  akslingen ikke alene trekker bilen ned i veien. Oppover-/nedoverbakker,
-  sidehelling, bakketopper og fall testes med egne kollisjonsflater.
-  Den lesebaserte sjekken `sa-scene --example vehicle-slopes` kontrollerte
-  106 retninger på skrå originalflater rundt Grove Street, med maksimalt
-  1,9 cm avvik fra forventet bilhøyde. Dette er ikke en audit av hele kartet.
-- Egne fragmentpass for alpha cutout og blending.
-- `--smoke-tour`: skjult native GPU-test gjennom ni områder.
-- `--smoke-stream`: sammenhengende frem-/tilbakerute på omtrent 1,2 km
-  med vanlige flybevegelsestaster. Kontrollerer flere nabolagsbytter,
-  endelige koordinater og at sceneinstallering ikke hopper kameraet.
-- Hopp stoppes av tak over hodet, inkludert treff ved kroppens ytterkant.
-  Pause med null tidssteg endrer heller ikke hopp-/gravitasjonstilstanden.
-- Små trinn opp til 38 cm undersøkes ved kroppens fremkant før veggløsning.
-  Sideveis inngang blokkeres dersom hele kroppshøyden ikke får plass.
-- `--probe-walk`: fire retninger fra Grove Street med original kollisjon,
-  1200 fysikksteg per retning. Logger faktisk fremdrift og kontakt med bakken.
-- `--capture-dir PATH` sammen med smoke-testen lagrer private renderbilder.
+- Indexing of 44,771 outdoor placements in this installation.
+- Fixed an IPL bug: only the lowest eight bits are the interior ID. Flags above
+  those bits must not cause outdoor terrain to be discarded.
+- Actual transformed model bounds are used to select neighborhood content.
+- Objects from IDE `anim` are included as static geometry. Their movement
+  is not yet implemented.
+- IDE `txdp` links texture dictionaries to their parents. The child's textures
+  take priority; cycles and excessively long chains are stopped. Dictionaries
+  are cached during a single area load with a 64 MiB limit.
+- Original `water.dat` is read as triangles/quads, with visibility flags
+  and height interpolation. Water is rendered using the original `waterclear256`
+  from the local `particle.txd`; its geometry is excluded from normal floor
+  collision.
+- Basic buoyancy and surface movement prevent sinking to the seabed.
+  Waves, diving and swimming animations are not yet included.
+- `--probe-water` checks buoyancy using original coastal geometry.
+- Parent models referenced by IPL LOD links are filtered out of the detailed view.
+- Distant LOD is displayed up to 2.5 km away. An IPL LOD group is displayed
+  either entirely in detail or as its LOD model, never partly; this previously
+  caused a ring of holes in the ground at the edge of the detailed area.
+  Distant models never participate in walking collision.
+  The camera's far clipping plane is 3.5 km.
+- Objects with interior ID 13 (“visible everywhere”) are now displayed outdoors.
+  This covers 284 placements, including roads, traffic lights and LOD buildings
+  in downtown Los Santos that were previously missing and left a large hole.
+- `--smoke-view eyeX,eyeY,eyeZ,targetX,targetY,targetZ --capture-dir <directory>`
+  captures an image from a fixed camera in the starting area to check the map.
+- An area that reaches the geometry budget (30,000 placements / 4 million triangles)
+  still loads: nearest details first, with the most distant scenery omitted.
+- The next area is centered ahead of a moving car (up to 120 m), so the car
+  does not reach the edge of the old area before the new one is ready.
+- Original COL1/2/3/4 collision containers are decoded. A total of 8,255 original
+  models were indexed. Triangles are used directly; boxes and spheres are triangulated.
+- Visual geometry is used as a collision fallback for models without COL.
+- First-person walking mode starts automatically. Recovery is provided after
+  falling far below the map. P keeps free-fly mode available for exploration
+  and debugging.
+- Native mods: DFF, TXD, PNG, optional COL, placements and model replacement.
+- DFF files with a leading UV animation dictionary are read with supported
+  UV animation. Invalid UV coordinates receive a fallback value; invalid
+  spatial data is rejected.
+  A metadata audit decoded 12,955 out of 12,955 DFF files from the local
+  `gta3.img`. This metadata audit demonstrates geometry loading, not support
+  for every material effect.
+- GPU uploads do not retain CPU copies of static, non-animated geometry.
+- Neighborhood streaming reuses GPU textures from the active area while the
+  same unchanged resource loader is still in use. Server/mod changes receive
+  separate uploads so identical texture names with different images are not
+  mixed up. CPU images are released incrementally within the upload time budget.
+  A before/after test on RTX 3070/Vulkan along the same 1.2 km route with seven
+  area changes reduced total uploads from 2871.6 to 871.5 MiB (about 70 percent).
+  The number of upload frames dropped from 1100 to 417. This measures reduced
+  work, not a guaranteed FPS or the absence of all driver/loading stutters.
+- One active drivable car, selected from the vehicle menu's original and custom
+  models, with a follow camera, terrain contact, wall collision and entry/exit.
+  `--smoke-car` checks driving, braking, exiting and re-entering.
+  The car's dynamic geometry is retained when neighborhoods change.
+  Parked and paused frames now reuse the car's GPU geometry until it moves
+  or rotates; model and session changes force a new update. The Skyline test
+  went from 54.01 MiB to 0 MiB of repeated vehicle mesh uploads across
+  30 parked frames. This measures eliminated work, not a specific FPS increase.
+- Ground contact is measured from each wheel's expected height on the tilted car.
+  The suspension also follows changes in road height while driving, so the
+  lower axle alone does not pull the car down into the road. Uphill/downhill
+  slopes, side slopes, crests and drops are tested using dedicated collision
+  surfaces.
+  The read-only check `sa-scene --example vehicle-slopes` checked 106 directions
+  on sloped original surfaces around Grove Street, with a maximum deviation
+  of 1.9 cm from the expected vehicle height. This is not an audit of the
+  entire map.
+- Separate fragment passes for alpha cutout and blending.
+- `--smoke-tour`: a hidden native GPU test through nine areas.
+- `--smoke-stream`: a continuous round trip of approximately 1.2 km using
+  normal free-fly movement keys. Checks multiple neighborhood changes,
+  finite coordinates and that installing a scene does not move the camera
+  unexpectedly.
+- Jumps are stopped by overhead ceilings, including hits at the body's outer edge.
+  Pausing with a zero time step does not change the jumping/gravity state either.
+- Small steps up to 38 cm are checked at the body's leading edge before wall
+  collision resolution. Sideways entry is blocked if there is not enough
+  clearance for the body's full height.
+- `--probe-walk`: four directions from Grove Street using original collision,
+  1200 physics steps per direction. Logs actual progress and ground contact.
+- `--capture-dir PATH` used with a smoke test saves private rendered images.
 
-## Verifikasjon
+## Verification
 
-Arbeidsløkken bruker `cargo test --workspace`, `--probe-world` og
-`--smoke-tour`. GPU-testen venter på vellykket rendering, laster ni områder
-og sjekker endelige spillerposisjoner. Bilder ligger privat under
-`native/target/captures/`. Grove Street-bildet er visuelt inspisert.
+The development loop uses `cargo test --workspace`, `--probe-world` and
+`--smoke-tour`. The GPU test waits for successful rendering, loads nine areas
+and checks finite player positions. Images are stored privately under
+`native/target/captures/`. The Grove Street image has been visually inspected.
 
-Utvalg før/etter retting av IPL-flagg, målt på 81 grunnprøver per område:
-landsbygda 27 til 81, Las Venturas 62 til 81, ørkenen 11 til 74.
-Dette beviser underlag ved prøvene, ikke at alle veier, broer eller trapper
-er uten feil. Noen prøver kan ligge på vann eller bratte flater. Første
-niområders-test brukte omtrent 0,2–1,1 sekund per CPU-last.
+Selected results before/after fixing IPL flags, measured using 81 ground
+probes per area: countryside 27 to 81, Las Venturas 62 to 81, desert 11 to 74.
+This demonstrates ground support at the sampled points, not that all roads,
+bridges or stairs are free of errors. Some samples may lie on water or steep
+surfaces. The first nine-area test took approximately 0.2–1.1 seconds per CPU load.
 
-IPL-regresjonstesten feilet som forventet mot den gamle filtreringen. Et eget
-generert rom testes gjennom native mod-loader og kollisjon: spilleren kan
-gå gjennom døren og stå på gulvet. Testdata inneholder ingen spill-assets.
+The IPL regression test failed as expected against the old filtering.
+A separate generated room is tested through the native mod loader and
+collision system: the player can walk through the doorway and stand on
+the floor. Test data contains no game assets.
 
-## Gjenstående arbeid
+## Remaining work
 
-Bilfysikken er fortsatt enkel: grunnleggende fjæring og tilt finnes, men
-videre tuning, hjulanimasjon, skade og trafikk gjenstår.
-Én aktiv custom DFF/TXD-bil kan overta F9-bilen via `vehicles` i mod-formatet.
-Følgekameraet testes mot vegger, tak og terreng.
-F9 prøver flere bilplasseringer med underlag under fotavtrykket,
-karosseriklaring og takhøyde; blokkert rotasjon i svinger avvises.
-Utstigning prøver flere
-sider og krever gulv, kroppsklaring og en fri vei ut. Dette bruker samme
-COL/visuelle reservegeometri som øvrig kollisjon, med et begrenset antall prøver.
-Spilleren har nå en synlig `fam1`-figur med tomgang, gange og løp i
-tredjeperson. V bytter mellom første- og tredjeperson. Kameraet har
-kollisjon mot kartet. AI for andre peds, riktig hoppe-/svømme-/bilsete-
-animasjon og overgangsblending gjenstår. Multiplayer finnes som prototype;
-personlige parkerte biler, passasjerreservasjoner og custom utseende deles.
-Bilbytte og felles kollisjonssimulering gjenstår.
-Asset-laget har nå en separat Skin/HAnim-laster og CPU-skinning med
-beinvekter og inverse bind-matriser. Bind-posen er kontrollert mot 265
-originale peds i det lokale arkivet. Dette brukes nå av spiller-renderingen,
-og én custom skinnet spillerfigur kan overta den via `player` i mod-formatet.
-Separate skinnede klær støttes via `player.clothes` med kompatible HAnim-
-bein og bind-matriser. Garderoben (F6) lar deg slå importerte plagg av og
-på under spilling. Kroppsdelmasker og montering av originale CJ-komponenter
-gjenstår. Antrekk lagres foreløpig ikke mellom spilløkter.
-ANP3-klipp kan nå samples og kobles til skjelettet via bein-ID. Alle 294
-klipp i lokal `ped.ifp` er lest og kontrollert med fem gyldige prøveposer
-per klipp. Gange, tomgang, løp og sprint matcher alle 32 spor til skjelettet.
-Live tomgang og løp er visuelt kontrollert i GPU-bilder. `--smoke-ped`
-tester 20 meter gange/løp, stopp og kamerabytte med kontrollert tidssteg.
-FiveM/GTA V-ressurser lastes ikke direkte. En eksperimentell
-[konverterer](gta5-conversion.md) kan klargjøre støttede Legacy-modeller som
-native ressurser. Custom DFF-rom kan plasseres med
-kollisjon, men dette er ikke en ferdig GTA V MLO-/portal-/interiørmotor.
-Originalinteriørarkivet leses nå også. Separat romlasting og 600 steg med
-gange/hopp er kontrollert i CJ sitt hus, Sweet sitt hus og Madd Dogg sin
-villa. Interiørmenyen (I) og retur via R/kart er GPU-kontrollert. Dørinnganger gjenstår; se
-`native-interiors.md` for kontrollen og begrensningene.
+Vehicle physics is still basic: simple suspension and tilt are implemented,
+but further tuning, wheel animation, damage and traffic remain.
+One active custom DFF/TXD car can replace the F9 car through `vehicles`
+in the mod format. The follow camera is tested against walls, ceilings and terrain.
+F9 tries several vehicle placements with ground support under the footprint,
+body clearance and headroom; obstructed rotation during turns is rejected.
+Exiting tries several sides and requires a floor, body clearance and an
+unobstructed path out. This uses the same COL/visual fallback geometry as
+other collision, with a limited number of samples.
+The player now has a visible `fam1` character with idle, walk and run animations
+in third person. V switches between first and third person. The camera
+collides with the map. AI for other peds, proper jumping/swimming/vehicle-seat
+animations and transition blending remain to be implemented. Multiplayer is
+available as a prototype; personal parked cars, passenger reservations and
+custom appearances are shared. Switching cars and shared collision
+simulation remain to be implemented.
+The asset layer now has a separate Skin/HAnim loader and CPU skinning with
+bone weights and inverse bind matrices. The bind pose has been checked
+against 265 original peds in the local archive. This is now used by player
+rendering, and one custom skinned player character can replace it through
+`player` in the mod format.
+Separate skinned clothing is supported through `player.clothes` with compatible
+HAnim bones and bind matrices. The wardrobe (F6) lets you toggle imported
+clothing items during gameplay. Body-part masks and assembly of original
+CJ components remain to be implemented. Outfits are not yet saved between
+game sessions.
+ANP3 clips can now be sampled and mapped to the skeleton by bone ID. All
+294 clips in the local `ped.ifp` have been read and checked with five valid
+sample poses per clip. Walk, idle, run and sprint match all 32 tracks to the
+skeleton. Live idle and run animations have been visually checked in GPU
+images. `--smoke-ped` tests 20 meters of walking/running, stopping and camera
+switching with a controlled time step.
+FiveM/GTA V resources are not loaded directly. An experimental
+[converter](gta5-conversion.md) can prepare supported Legacy models as
+native resources. Custom DFF rooms can be placed with collision, but this
+is not a complete GTA V MLO/portal/interior engine.
+The original interior archive is now also read. Separate room loading and
+600 steps of walking/jumping have been checked in CJ's house, Sweet's house
+and Madd Dogg's mansion. The interior menu (I) and returning via R/the map
+have been GPU-tested. Doorway entrances remain to be implemented; see
+`native-interiors.md` for verification and limitations.
 
-Kartet har detaljstreaming med foreløpig fjern-LOD. Bølger, dykking, tidsstyrte objekter,
-enkelte RenderWare-effekter, transparentsortering og mer
-korrekt fysikk gjenstår. Modeller kan hoppes over med forklaring i konsollen,
-og noen materialer får reservefarge. COL-kuler bruker trekanttilnærming og
-kroppskollisjon bruker et begrenset antall prøver fremfor en full kapselsweep.
+The map has detail streaming with preliminary distant LOD. Waves, diving,
+timed objects, some RenderWare effects, transparency sorting and more
+accurate physics remain to be implemented. Models may be skipped with an
+explanation in the console, and some materials receive a fallback color.
+COL spheres use a triangle approximation, and body collision uses a limited
+number of samples instead of a full capsule sweep.
 
-Neste milepæl er å kjøre sammen med venner i egne biler. Se
-[prioriteringer og kriterier](roadmap.md). Streaming, ytelse og videre tuning
-av bilfysikken følger arbeidet som løpende kvalitetskrav.
+The next milestone is driving together with friends in your own cars. See
+[priorities and criteria](roadmap.md). Streaming, performance and further
+vehicle physics tuning remain ongoing quality requirements.
 
-Formatkilder: [COL](https://gtamods.com/wiki/Collision_File),
-[IPL-flagg](https://gtaundergroundmod.com/pages/ug-mp/documentation/dl/map-dl/ipl/inst).
+Format references: [COL](https://gtamods.com/wiki/Collision_File),
+[IPL flags](https://gtaundergroundmod.com/pages/ug-mp/documentation/dl/map-dl/ipl/inst).
 
-Kjørefysikken bruker nå treghet, gradvis styring og sideveis dekkgrep.
-Se [vehicle dynamics](vehicle-dynamics.md) for detaljer og begrensninger.
+Driving physics now uses inertia, gradual steering and lateral tire grip.
+See [vehicle dynamics](vehicle-dynamics.md) for details and limitations.
 
-Grafikkmenyen har egne kategorier, kvalitetsprofiler og fungerende FSR 1.
-Se [grafikkstatus](graphics.md) og [Linux/Vulkan](linux.md). DLSS og temporal
-FSR er fortsatt ikke integrert.
+The graphics menu has separate categories, quality presets and working FSR 1.
+See [graphics status](graphics.md) and [Linux/Vulkan](linux.md).
+DLSS and temporal FSR are still not integrated.
 
-Original motorlyd og lokale fottrinn er koblet inn. Motorer høres også fra
-nærliggende multiplayer-biler, inkludert bilen man sitter i som passasjer.
-Voluminnstillingene gjelder disse lydene. Kollisjonslyd, materialavhengige
-fottrinn og originalradio gjenstår; se [lydstatus](native-audio.md).
+Original engine audio and local footsteps are integrated. Engines can also
+be heard from nearby multiplayer cars, including the car you are riding in
+as a passenger. Volume settings apply to these sounds. Collision sounds,
+material-dependent footsteps and original radio remain to be implemented;
+see [audio status](native-audio.md).
 
-Bilfysikken bruker akselbaserte dekkrefter, delt grep for bremsing/svinging,
-fire bakkekontakter og dempet fjæring/karosseribevegelse. Styreretningen med
-tastatur og kontroller er rettet. Skade, bevegelige hjul og full
-rigid-body-kollisjon er fortsatt ikke simulert.
+Vehicle physics uses axle-based tire forces, shared grip for braking/cornering,
+four ground contacts and damped suspension/body movement. Steering direction
+with keyboard and controller has been corrected. Damage, animated wheels and
+full rigid-body collision are still not simulated.
 
-En lokal prøvepakke med 32 oppskalerte teksturer ved 2x er laget og prøvd i
-Vulkan. Dette er ikke en oppskalering av hele kartet eller en FPS-måling.
-[Verktøyet for teksturoppskalering](texture-upscaling.md) lager PNG-overrides
-som en separat native mod; originalfilene endres ikke. De genererte
-spillteksturene er lokale og følger ikke Git-repoet.
+A local sample pack of 32 textures upscaled 2x has been created and tested
+in Vulkan. This is not an upscale of the entire map or an FPS measurement.
+The [texture-upscaling tool](texture-upscaling.md) creates PNG overrides as a
+separate native mod; the original files are not modified. Generated game
+textures remain local and are not included in the Git repository.
