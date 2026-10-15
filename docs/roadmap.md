@@ -1,92 +1,100 @@
-# Veikart for native freeroam
+# Native Freeroam Roadmap
 
-Neste milepæl: **kjør sammen med venner i egne biler**, med opptil 20 spillere
-inkludert verten. Missions er ikke prioritert. Dette dokumentet beskriver
-planlagt arbeid; [multiplayer-status](multiplayer.md) og
-[freeroam-status](freeroam-status.md) beskriver det som faktisk finnes.
+Next milestone: **drive together with friends in your own cars**, with up to
+20 players including the host. Missions are not a priority. This document
+describes planned work; [multiplayer status](multiplayer.md) and
+[freeroam status](freeroam-status.md) describe what is currently implemented.
 
-## Prioriteringer
+## Priorities
 
-| Prioritet | Arbeid | Kriterium for milepælen |
+| Priority | Work | Milestone criteria |
 | --- | --- | --- |
-| 1 | Multiplayer på forskjellige PC-er og nettverk | To faktiske PC-er kan koble til, kjøre mellom streamede områder, koble fra og koble til igjen. Test både LAN og internett; samme-PC-testen dekker ikke dette. |
-| 2 | Felles biler og passasjerer – implementert første versjon | Personlige biler vises etter utstigning, og verten reserverer tre passasjerplasser. Bilbytte, modellspesifikt seteantall og felles kollisjonsrespons gjenstår. |
-| 3 | Bil, ped, antrekk og ressursversjoner – implementert første versjon | Valgte modeller og klesvalg deles fra en kontrollert ressursliste. Test videre på forskjellige PC-er med større modpakker. |
-| 4 | Lyd – motorer og lokale fottrinn implementert | Originale motorloops følger fart og plassering, også i multiplayer. Lokale fottrinn følger bevegelse på bakken. Kollisjonslyd, materialvalg og fjernstyrte fottrinn gjenstår. |
-| 5 | Trafikk og gående NPC-er | Start i ett nabolag med et begrenset antall aktører; mål ytelse og definer hvem som simulerer dem i multiplayer. |
-| 6 | Lokal offline-lagring – implementert første versjon | Trygg utendørsposisjon, kamera, bil, ped og antrekk gjenopptas. Innendørs, serverfremdrift, kontinuerlig autosave og nøyaktig bilparkering gjenstår. |
-| 7 | Døgnsyklus, vær og Classic/Enhanced-profiler | Sammenhengende lys/vær og valgbare uttrykk, med samme tid/vær for deltakere i en session. Dagens grafikkprofiler er ikke en ferdig døgn-/værsimulering. |
+| 1 | Multiplayer across different PCs and networks | Two separate PCs can connect, drive between streamed areas, disconnect and reconnect. Test both LAN and internet connections; testing on a single PC does not cover this. |
+| 2 | Shared cars and passengers — initial version implemented | Personal cars remain visible after the driver exits, and the host reserves three passenger seats. Switching cars, model-specific seat counts and shared collision response remain to be implemented. |
+| 3 | Cars, peds, outfits and resource versions — initial version implemented | Selected models and clothing choices are shared from a validated resource list. Continue testing across different PCs with larger mod packs. |
+| 4 | Audio — engines and local footsteps implemented | Original engine loops respond to speed and position, including in multiplayer. Local footsteps follow grounded movement. Collision sounds, material-specific sounds and remote players' footsteps remain to be implemented. |
+| 5 | Traffic and pedestrian NPCs | Start in one neighborhood with a limited number of actors; measure performance and define who simulates them in multiplayer. |
+| 6 | Local offline saves — initial version implemented | A safe outdoor position, camera, car, ped and outfit are restored. Interiors, server progress, continuous autosaving and exact vehicle parking positions remain to be implemented. |
+| 7 | Day/night cycle, weather and Classic/Enhanced profiles | Consistent lighting and weather with selectable visual styles, and synchronized time and weather for everyone in a session. The current graphics presets are not a complete day/night or weather simulation. |
 
-Streaming, ytelse og bilfysikk må fortsatt tunes. Fjæring, pitch/roll og
-akselbaserte dekkrefter finnes; bevegelige hjul, skade og en full fysisk
-kollisjonsrespons gjenstår. En kapasitetstest med 20 nettverksklienter er ikke
-dokumentasjon på ytelse med 20 fullt renderende spillere.
+Streaming, performance and vehicle physics still need tuning. Suspension,
+pitch/roll and axle-based tire forces are implemented; animated wheels, damage
+and full physical collision response remain to be implemented. A capacity test
+with 20 network clients does not demonstrate performance with 20 fully
+rendering player clients.
 
-## Spillerhosting med serverbrowser og joincode
+## Player hosting with a server browser and join codes
 
-Dagens vert simulerer sin lokale verden og videresender spillerposeringer.
-En første relay-versjon med serverbrowser og offentlige/private rom finnes nå;
-se [oppsettet](multiplayer.md). `sa-relay` registrerer navn, spillerantall og
-runtime-versjon. Private rom utelates fra listen og bruker en tilfeldig joincode
-som invitasjon. Begge parter kobler ut, og all trafikk går via relayen.
-Ressurslister, versjonssjekk og automatisk nedlasting/cache er nå koblet inn.
+The current host simulates its local world and relays player poses.
+An initial relay implementation with a server browser and public/private rooms
+is now available; see the [setup guide](multiplayer.md). `sa-relay` registers
+the server name, player count and runtime version. Private rooms are omitted
+from the list and use a random join code as an invitation. Both sides establish
+outbound connections, and all traffic passes through the relay.
+Resource lists, version checks and automatic downloading/caching are now integrated.
 
-Direkte P2P uten manuell portåpning trenger NAT-traversering og en relay-reserve
-når direkte forbindelse ikke virker, blant annet bak CGNAT. Direkte P2P er
-fortsatt framtidig arbeid. Verten er fortsatt en spillers PC når
-trafikken går via relay; et dedikert spillserverprogram er ikke nødvendig.
-Katalog og relay trenger derimot en tilgjengelig tjeneste med drift og
-konfigurasjon. Ingen slik offentlig tjeneste er satt opp for prosjektet nå.
+Direct P2P without manual port forwarding requires NAT traversal and a relay
+fallback when a direct connection fails, including behind CGNAT. Direct P2P
+remains future work. The host is still a player's PC when traffic passes
+through the relay; a dedicated game server application is not required.
+The directory and relay do, however, need a reachable service with hosting
+and configuration. No such public service is currently set up for the project.
 
-Mulige tjenestebaserte løsninger er
-[Epic Online Services P2P/lobby](https://dev.epicgames.com/docs/epic-online-services/multiplayer/nat-p2p-interface/eosp-2-p-sample)
-eller [Steam Networking](https://partner.steamgames.com/doc/features/multiplayer/networking).
-Valg og prosjektoppsett må avklares før integrasjon; dokumentasjonen betyr
-ikke at prosjektet allerede har tilgang til deres produksjonstjenester.
-Direkte IP beholdes som et alternativ for lokal testing.
+Possible service-based solutions include
+[Epic Online Services P2P/lobbies](https://dev.epicgames.com/docs/epic-online-services/multiplayer/nat-p2p-interface/eosp-2-p-sample)
+or [Steam Networking](https://partner.steamgames.com/doc/features/multiplayer/networking).
+The choice and project setup must be settled before integration; this
+documentation does not mean the project already has access to their production
+services. Direct IP remains an option for local testing.
 
-## Automatisk modnedlasting og cache
+## Automatic mod downloads and caching
 
-Implementert første join-flyt:
+The initial joining flow is implemented:
 
-1. Hent vertens ordnede ressursliste: ressurs-ID, formatversjon, filnavn,
-   størrelse og SHA-256 for hver fil. Kontroller runtime-kompatibilitet.
-2. Vis nødvendige ressurser, nedlastingsstørrelse og fremdrift. Brukerens valg
-   om automatisk nedlasting styrer om nye filer hentes uten et ekstra spørsmål.
-3. Gjenbruk filer i en separat cache når innholdshashen stemmer. Hent bare
-   manglende eller endrede filer, med grenser for filstørrelse og total lagring.
-4. Last ned til midlertidige filer og kontroller faktisk størrelse og hash før
-   de tas i bruk. Avbrutte/ugyldige filer aktiveres aldri som ferdige ressurser.
-5. Last et eget ressurssett for sesjonen i avtalt rekkefølge. Lokale mods
-   overskrives ikke. Gjenopprett det lokale ressurssettet ved frakobling.
+1. Fetch the host's ordered resource list: resource ID, format version,
+   filename, size and SHA-256 for each file. Check runtime compatibility.
+2. Show required resources, download size and progress. The user's automatic
+   download preference determines whether new files are fetched without an
+   additional prompt.
+3. Reuse files in a separate cache when their content hashes match. Fetch only
+   missing or changed files, with limits on file size and total storage.
+4. Download to temporary files and verify their actual size and hash before
+   using them. Interrupted or invalid files are never activated as complete
+   resources.
+5. Load a separate resource set for the session in the agreed order. Local
+   mods are not overwritten. Restore the local resource set on disconnect.
 
-Cachen skal identifisere innhold, ikke bare servernavn. En endret ressurs får
-ny hash, mens uendrede filer kan brukes ved neste join. En hash oppdager
-endrede/skadede filer; den gjør ikke verten eller filinnholdet pålitelig.
-Nedlastingen skal tillate støttede dataressurser, med avvisning av absolutte
-stier, `..`, lenker ut av cacheområdet og kjørbare plugins/scripts.
-En cacheoversikt med diskbruk og sletting av ubrukte ressurser gjenstår.
+The cache should identify content, not just server names. A changed resource
+gets a new hash, while unchanged files can be reused on the next join. A hash
+detects changed or corrupted files; it does not make the host or the file
+contents trustworthy. Downloads should allow supported data resources while
+rejecting absolute paths, `..`, links outside the cache directory and
+executable plugins/scripts. A cache overview showing disk usage and allowing
+unused resources to be deleted remains to be implemented.
 
-Første omfang er native manifest, DFF/TXD/PNG/COL/IFP og støttede biler, peds,
-klær og plasseringer. GTA V/FiveM-modeller må konverteres på vertssiden før de
-kan deles som native ressurser; Lua-scripts og vilkårlige FiveM-pakker får
-ikke kompatibilitet av automatisk nedlasting. Originale San Andreas-filer
-skal fortsatt leses fra hver spillers egen installasjon. Verten må bare dele
-mods som de har rett til å distribuere.
+The initial scope covers native manifests, DFF/TXD/PNG/COL/IFP and supported
+cars, peds, clothing and placements. GTA V/FiveM models must be converted on
+the host side before they can be shared as native resources; automatic
+downloading does not make Lua scripts or arbitrary FiveM packages compatible.
+Original San Andreas files must still be read from each player's own
+installation. The host must only share mods they have the right to distribute.
 
-Loaderen forbereder nå et eget ressurssett på en bakgrunnstråd og laster
-GPU-data gradvis før et samlet bytte. Offline-verdenen beholdes og gjenopprettes
-ved frakobling. Tester dekker cachetreff, versjonsendring, feil hash, avbrudd,
-ugyldige stier og ressursbytte/gjenoppretting i to Vulkan-instanser. Valgt bil,
-ped og antrekk synkroniseres nå, med separat klesvisning per spiller.
+The loader now prepares a separate resource set on a background thread and
+uploads GPU data incrementally before switching the complete set into use.
+The offline world is preserved and restored on disconnect. Tests cover cache
+hits, version changes, incorrect hashes, interruptions, invalid paths and
+resource switching/restoration in two Vulkan instances. The selected car,
+ped and outfit are now synchronized, with separate clothing rendering for
+each player.
 
-## Servermodell inspirert av ReSkate
+## Server model inspired by ReSkate
 
-Vennehosting beholdes i spillet, og `sa-server` kan nå kjøre uten spillvindu
-eller originalinstallasjon. Se [serveroppsettet](server-hosting.md). Begge kan registreres i
-samme browser og bruke joincode og native ressurscache. Første transport
-er fortsatt prosjektets egen relay. Steam-lobbyer og Valves relay krever
-eget integrasjonsarbeid og avklart Steamworks-oppsett.
+Hosting for friends remains available in the game, and `sa-server` can now run
+without a game window or an original installation. See the
+[server setup guide](server-hosting.md). Both can register in the same browser
+and use join codes and the native resource cache. The initial transport is
+still the project's own relay. Steam lobbies and Valve's relay require
+separate integration work and an agreed Steamworks setup.
 
-Referanse: [ReSkates serveroppsett](https://github.com/Dingo-Shenanigans/ReSkate/blob/main/Server/README.txt),
-sjekket 7. oktober 2026. Deres Steam-integrasjon er ikke lagt inn i prosjektet.
+Reference: [ReSkate's server setup](https://github.com/Dingo-Shenanigans/ReSkate/blob/main/Server/README.txt),
+checked on October 7, 2026. Its Steam integration has not been added to this project.
